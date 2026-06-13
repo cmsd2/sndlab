@@ -1,0 +1,16 @@
+[package]
+name = "sndlab-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Reusable engine for sndlab: Rhai scripting bound to a Kira/fundsp audio backend. Embeddable in TUIs, games, or batch tools."
+
+[dependencies]
+rhai.workspace = true
+kira.workspace = true
+fundsp.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

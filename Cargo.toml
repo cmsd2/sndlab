@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/sndlab"]
+members = ["crates/sndlab", "crates/sndlab-core"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,10 @@ repository = "https://github.com/cmsd2/sndlab"
 publish = false
 
 [workspace.dependencies]
+# Internal: reusable engine for sndlab the TUI and any downstream
+# consumer that wants to load .rhai patches at runtime.
+sndlab-core = { path = "crates/sndlab-core" }
+
 # TUI
 ratatui = "0.29"
 tui-textarea = { version = "0.7", features = ["crossterm", "search"] }

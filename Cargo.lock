@@ -1943,12 +1943,24 @@ dependencies = [
  "rmcp",
  "ron",
  "serde",
+ "sndlab-core",
  "syntect",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "tui-textarea",
+]
+
+[[package]]
+name = "sndlab-core"
+version = "0.1.0"
+dependencies = [
+ "fundsp",
+ "kira",
+ "rhai",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
