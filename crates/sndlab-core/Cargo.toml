@@ -14,3 +14,8 @@ kira.workspace = true
 fundsp.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+
+# Determinism: every patch evaluation seeds an explicit PCG generator
+# from the patch name, so re-evaluating produces the same buffer.
+rand = "0.8"
+rand_pcg = "0.3"

@@ -63,17 +63,18 @@ consumer; an embedded game audio engine is another (see
 
 | Primitive | Status | Sketch |
 |---|---|---|
-| `patch(name, role, body)` | planned | Register a named patch |
-| `sine(freq_hz, dur_s)` | planned | Sine oscillator |
-| `noise(kind, dur_s)` | planned | Noise generator (white/pink/brown) |
-| `env(attack_s, decay_s)` | planned | Attack + exp decay envelope |
-| `gain(linear)` | planned | Linear amplitude scaling |
-| `mix([sig, ...])` | planned | Sum signals |
-| `tap(delay_s, gain)` | planned | Delay tap (for reverb tails) |
+| `patch(name, role, signal)` | shipped | Register a named patch |
+| `sine(freq_hz, dur_s)` | shipped | Sine oscillator |
+| `noise(kind, dur_s)` | shipped | Noise generator (white/pink/brown) |
+| `signal.env(attack_s, decay_s)` | shipped | Attack + exp decay envelope |
+| `signal.gain(linear)` | shipped | Linear amplitude scaling |
+| `mix([sig, ...])` | shipped | Sum signals |
+| `tap(delay_s, gain)` + `signal.with_taps([...])` | shipped | Discrete delay-tap reverb |
 
 `Status` flips to `shipped` as primitives land. Whenever a row flips,
 the [DSL overview](./book/src/dsl/overview.md) status table and the
-corresponding chapter both get updated in the same commit.
+corresponding chapter both get updated in the same commit, per the
+discipline in [CLAUDE.md](./CLAUDE.md).
 
 ## Documentation
 

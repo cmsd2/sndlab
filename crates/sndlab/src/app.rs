@@ -1,15 +1,17 @@
-//! Top-level TUI state. Holds the editor, the log pane, and assorted
-//! status fields. Pure state + input dispatch; rendering lives in
-//! `ui::render`.
+//! Top-level TUI state. Holds the editor, the log pane, the engine,
+//! and assorted status fields. Pure state + input dispatch; rendering
+//! lives in `ui::render`.
 
 use ratatui::widgets::{Block, Borders};
+use sndlab_core::Engine;
 use tui_textarea::{Input, Key, TextArea};
 
-use crate::log::{LogKind, LogPane};
+use crate::log::LogPane;
 
 pub struct App<'a> {
     pub editor: TextArea<'a>,
     pub log: LogPane,
+    pub engine: Engine,
     pub should_quit: bool,
     /// MCP endpoint string for the status bar. Empty until the MCP
     /// server is wired up.
@@ -17,12 +19,6 @@ pub struct App<'a> {
     /// Filename being edited. Cosmetic for now — the editor doesn't
     /// know about disk yet.
     pub filename: String,
-}
-
-impl Default for App<'_> {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl App<'_> {
@@ -33,13 +29,38 @@ impl App<'_> {
                 .borders(Borders::ALL)
                 .title(" patches.rhai "),
         );
+        // Seed the editor with a small example so the first Ctrl+R
+        // does something audible without the user having to type
+        // anything first.
+        for line in [
+            r#"patch("ping", "one_shot","#,
+            r#"    sine(330.0, 1.5).env(0.008, 1.4).gain(0.32)"#,
+            r#"        .with_taps(["#,
+            r#"            tap(0.13, 0.55),"#,
+            r#"            tap(0.31, 0.38),"#,
+            r#"            tap(0.58, 0.26),"#,
+            r#"        ]));"#,
+        ] {
+            editor.insert_str(line);
+            editor.insert_newline();
+        }
+
         let mut log = LogPane::default();
-        log.info(
-            "sndlab ready — Ctrl+R to evaluate, Ctrl+Q to quit (no audio backend yet)",
-        );
+        let engine = Engine::new().unwrap_or_else(|e| {
+            log.error(format!("engine init failed: {e}"));
+            panic!("engine init failed: {e}");
+        });
+        if engine.has_audio() {
+            log.info("sndlab ready — Ctrl+R evaluates and plays the first patch");
+        } else {
+            log.warn("sndlab ready, but audio backend unavailable — playback will be silent");
+        }
+        log.info("Ctrl+R eval+play   Ctrl+S save (todo)   Ctrl+Q quit");
+
         Self {
             editor,
             log,
+            engine,
             should_quit: false,
             mcp_endpoint: String::new(),
             filename: "patches.rhai".into(),
@@ -62,36 +83,66 @@ impl App<'_> {
                 self.should_quit = true;
                 true
             }
-            // Evaluate (placeholder — the engine wires in next task).
+            // Evaluate the buffer and play the first registered patch.
             Input {
                 key: Key::Char('r'),
                 ctrl: true,
                 ..
             } => {
-                self.log.push(
-                    LogKind::Info,
-                    format!(
-                        "eval requested ({} lines, {} bytes) — engine not yet wired",
-                        self.editor.lines().len(),
-                        self.editor.lines().iter().map(|s| s.len() + 1).sum::<usize>()
-                    ),
-                );
+                self.eval_and_play();
                 true
             }
-            // Save (placeholder).
+            // Save (placeholder — project layer in task 9).
             Input {
                 key: Key::Char('s'),
                 ctrl: true,
                 ..
             } => {
                 self.log
-                    .push(LogKind::Info, "save requested — project layer not yet wired");
+                    .info("save requested — project layer not yet wired");
                 true
             }
             // Everything else goes to the editor.
             other => {
                 self.editor.input(other);
                 false
+            }
+        }
+    }
+
+    /// Compile the buffer through Rhai, then auto-play the first
+    /// patch. The "first patch" rule is a Phase-1 convenience; once
+    /// the project model lands the user gets to pick.
+    fn eval_and_play(&mut self) {
+        let source = self.editor.lines().join("\n");
+        match self.engine.eval(&source) {
+            Ok(summary) => {
+                self.log.info(format!(
+                    "eval ok — {} patch(es): [{}]",
+                    summary.patches.len(),
+                    summary
+                        .patches
+                        .iter()
+                        .map(|p| p.name.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                for m in &summary.messages {
+                    self.log.warn(m.clone());
+                }
+                if let Some(first) = summary.patches.first() {
+                    match self.engine.play(&first.name) {
+                        Ok(()) => self
+                            .log
+                            .audio(format!("playing '{}' ({:.2} s)", first.name, first.duration_s)),
+                        Err(e) => self.log.error(format!("play failed: {e}")),
+                    }
+                } else {
+                    self.log.warn("no patches registered — script ran but didn't call patch(...)");
+                }
+            }
+            Err(e) => {
+                self.log.error(format!("eval failed: {e}"));
             }
         }
     }

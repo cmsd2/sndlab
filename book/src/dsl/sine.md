@@ -1,7 +1,36 @@
 # `sine`
 
-> Stub — fill in when the primitive ships.
->
-> Planned shape: `sine(freq_hz, duration_s) -> Signal`. Produces a pure
-> sine wave at the given frequency for the given duration. Phase starts
-> at zero. Amplitude is 1.0; use `.gain(...)` to scale.
+A pure sine wave at a given frequency for a given duration.
+
+## Signature
+
+```rhai
+sine(freq_hz, duration_s) -> Signal
+```
+
+Both arguments accept integers or floats. Internally everything is
+`f32` at 48 kHz; the script is free to use either numeric type.
+
+- **`freq_hz`** — frequency in Hertz.
+- **`duration_s`** — length of the resulting buffer, in seconds.
+
+Amplitude is unit (`±1.0`). Use `.gain(...)` to scale.
+
+## Example
+
+```rhai
+let pure_a4 = sine(440.0, 1.0);                  // A above middle C, 1 second
+let scaled  = sine(440.0, 1.0).gain(0.5);        // half amplitude
+let chime   = sine(880, 0.4).env(0.005, 4.0);    // short, fast attack, ringing decay
+```
+
+## Notes
+
+- Phase starts at zero. Successive `sine` calls don't share phase —
+  each is an independent buffer.
+- Negative or zero `duration_s` produce an empty buffer (length 0)
+  with no error.
+- Very low frequencies (< ~10 Hz) are valid but you won't hear them
+  on most playback hardware; they're useful as control signals for
+  modulating other layers (a use case the current DSL doesn't expose
+  directly — coming with the modulation work).

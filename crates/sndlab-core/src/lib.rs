@@ -1,19 +1,19 @@
 //! sndlab-core: the reusable audio engine.
 //!
-//! Wraps a Rhai script engine and a Kira audio manager. Scripts register
-//! named *patches* via a small DSL (`sine`, `noise`, `env`, `gain`, `mix`,
-//! `tap`, `patch`); the host evaluates the script, then asks the engine
-//! to play patches by name.
+//! Wraps a Rhai script engine and a Kira audio manager. Scripts
+//! register named *patches* via a small DSL (`sine`, `noise`, `env`,
+//! `gain`, `mix`, `tap`, `with_taps`, `patch`); the host evaluates the
+//! script, then asks the engine to play patches by name.
 //!
 //! This crate has no UI, no MCP, no project model. Those live in the
-//! `sndlab` binary. The split exists so games and batch tools can embed
-//! this engine without dragging in a TUI.
-//!
-//! # Status
-//!
-//! Skeleton — the API surface is shaped here but the implementation
-//! arrives in subsequent commits (DSL registration, Rhai-to-buffer
-//! render, Kira playback).
+//! `sndlab` binary. The split exists so games and batch tools can
+//! embed this engine without dragging in a TUI.
+
+mod engine;
+mod signal;
+
+pub use engine::Engine;
+pub use signal::{NoiseKind, Signal, Tap, SAMPLE_RATE};
 
 use std::sync::Arc;
 
@@ -52,48 +52,118 @@ pub struct PatchInfo {
 #[derive(Debug, Default, Clone)]
 pub struct EvalSummary {
     pub patches: Vec<PatchInfo>,
-    /// Free-form notes from the host (e.g. parse warnings).
+    /// Free-form notes from the host (e.g. patch redefinitions).
     pub messages: Vec<String>,
 }
 
-/// The audio engine. Holds the live Kira manager and the registered
-/// patches.
-pub struct Engine {
-    // Placeholders until the implementation lands.
-    _placeholder: (),
-}
-
-impl Engine {
-    /// Construct a new engine and try to bring up the audio backend.
-    /// Returns an `Audio` error if the OS audio device cannot be opened;
-    /// the caller may choose to fall back to a silent mode.
-    pub fn new() -> Result<Self> {
-        Ok(Self { _placeholder: () })
-    }
-
-    /// Evaluate a script and replace the engine's set of patches with
-    /// whatever the script registered. Atomic on success.
-    pub fn eval(&mut self, _source: &str) -> Result<EvalSummary> {
-        Ok(EvalSummary::default())
-    }
-
-    /// Play a patch by name. Returns immediately; audio runs on its own
-    /// thread driven by Kira/cpal.
-    pub fn play(&mut self, name: &str) -> Result<()> {
-        Err(Error::UnknownPatch(name.into()))
-    }
-
-    /// Currently-registered patches, in registration order.
-    pub fn patches(&self) -> &[PatchInfo] {
-        &[]
-    }
-}
-
 /// A baked audio buffer: mono samples plus the sample rate they were
-/// rendered at. The TUI uses this to display a scope; the host uses it
-/// to play through Kira.
+/// rendered at. The TUI uses this to display a scope; the host uses
+/// it to play through Kira.
 #[derive(Debug, Clone)]
 pub struct Buffer {
     pub sample_rate: u32,
     pub samples: Arc<[f32]>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A sine + envelope patch evaluates, registers under the expected
+    /// name, has the expected duration, and is non-silent.
+    #[test]
+    fn sine_patch_round_trips() {
+        let mut engine = Engine::new().expect("engine init");
+        let summary = engine
+            .eval(
+                r#"
+                patch("ping", "one_shot", sine(330.0, 0.5).env(0.01, 2.0).gain(0.3));
+            "#,
+            )
+            .expect("eval ok");
+        assert_eq!(summary.patches.len(), 1);
+        assert_eq!(summary.patches[0].name, "ping");
+        assert_eq!(summary.patches[0].role, PatchRole::OneShot);
+        let buf = engine.render("ping").expect("render ok");
+        // 0.5 s at 48 kHz is 24_000 samples; allow rounding.
+        assert!((buf.samples.len() as i64 - 24_000).abs() < 2);
+        let peak = buf
+            .samples
+            .iter()
+            .map(|s| s.abs())
+            .fold(0.0_f32, f32::max);
+        assert!(peak > 0.01, "buffer should have meaningful amplitude");
+        assert!(peak < 1.0, "buffer should not clip");
+    }
+
+    /// Reverb taps extend the buffer past the dry source and contribute
+    /// non-zero samples in the tail.
+    #[test]
+    fn reverb_taps_extend_signal() {
+        let mut engine = Engine::new().expect("engine init");
+        engine
+            .eval(
+                r#"
+                patch("rev", "one_shot",
+                    sine(440.0, 0.2).gain(0.5)
+                        .with_taps([tap(0.3, 0.4), tap(0.6, 0.2)]));
+            "#,
+            )
+            .expect("eval ok");
+        let buf = engine.render("rev").expect("render ok");
+        // Source is 0.2 s; longest tap delays by 0.6 s → buffer ≈ 0.8 s.
+        let len_s = buf.samples.len() as f32 / buf.sample_rate as f32;
+        assert!(len_s > 0.75 && len_s < 0.85, "len_s = {len_s}");
+        // Tail (after the dry portion) should contain non-zero samples.
+        let tail = &buf.samples[(buf.samples.len() * 3 / 4)..];
+        let tail_peak = tail.iter().map(|s| s.abs()).fold(0.0_f32, f32::max);
+        assert!(tail_peak > 0.001, "tap energy should reach the tail");
+    }
+
+    /// Playing an unknown patch returns UnknownPatch.
+    #[test]
+    fn unknown_patch_errors() {
+        let mut engine = Engine::new().expect("engine init");
+        assert!(matches!(
+            engine.play("nope"),
+            Err(Error::UnknownPatch(_))
+        ));
+    }
+
+    /// Re-eval replaces the patch table atomically — an old patch
+    /// that's not in the new script disappears.
+    #[test]
+    fn re_eval_replaces_patches() {
+        let mut engine = Engine::new().expect("engine init");
+        engine
+            .eval(r#"patch("a", "one_shot", sine(200.0, 0.1));"#)
+            .expect("eval a");
+        engine
+            .eval(r#"patch("b", "one_shot", sine(300.0, 0.1));"#)
+            .expect("eval b");
+        let names: Vec<_> = engine.patches().iter().map(|p| p.name.clone()).collect();
+        assert_eq!(names, vec!["b"]);
+    }
+
+    /// Mixing two short signals produces a buffer the length of the
+    /// longer input and contains contributions from both.
+    #[test]
+    fn mix_sums_signals() {
+        let mut engine = Engine::new().expect("engine init");
+        engine
+            .eval(
+                r#"
+                patch("twin", "one_shot",
+                    mix([
+                        sine(220.0, 0.1).gain(0.3),
+                        sine(330.0, 0.2).gain(0.3),
+                    ]));
+            "#,
+            )
+            .expect("eval ok");
+        let buf = engine.render("twin").expect("render ok");
+        // Output length is max input length (0.2 s).
+        let len_s = buf.samples.len() as f32 / buf.sample_rate as f32;
+        assert!((len_s - 0.2).abs() < 0.01, "len_s = {len_s}");
+    }
 }
