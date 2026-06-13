@@ -91,9 +91,17 @@ impl Signal {
         Signal::new(out)
     }
 
-    /// Reverb-style tail: copy the source at each tap's offset with the
-    /// tap's gain, summed back into the buffer. The output extends past
-    /// the source by the longest tap if needed.
+    /// Reflection-style tail: at each tap's offset, sum a delayed,
+    /// attenuated, *fast-decaying* copy of the source into the buffer.
+    /// The per-tap exponential decay (`tap.decay_k`) is what makes
+    /// each tap sound like a brief reflection rather than a sustained
+    /// replay of the entire source. With `decay_k = 0` the tap is a
+    /// literal delayed copy; with `decay_k = 12.0` (the default for
+    /// two-arg `tap`) it falls to 1/e in ~80 ms, which sounds like a
+    /// discrete reflection of the source's attack transient.
+    ///
+    /// The output extends past the source by the longest tap delay so
+    /// the tail of the last tap has somewhere to live.
     pub fn with_taps(&self, taps: &[Tap]) -> Signal {
         let src_len = self.samples.len();
         let extra = taps
@@ -106,31 +114,54 @@ impl Signal {
         for (i, &v) in self.samples.iter().enumerate() {
             out[i] = v;
         }
+        let inv_sr = 1.0 / SAMPLE_RATE_F;
         for tap in taps {
             let offset = (tap.delay_s * SAMPLE_RATE_F) as usize;
             for (i, &v) in self.samples.iter().enumerate() {
                 let dst = offset + i;
-                if dst < n {
-                    out[dst] += v * tap.gain;
+                if dst >= n {
+                    break;
                 }
+                // `t` is measured from the tap's onset, not the source's
+                // — so each tap has its own envelope timer.
+                let t = i as f32 * inv_sr;
+                let env = if tap.decay_k > 0.0 {
+                    (-t * tap.decay_k).exp()
+                } else {
+                    1.0
+                };
+                out[dst] += v * tap.gain * env;
             }
         }
         Signal::new(out)
     }
 }
 
-/// One element of a reverb-tail tap list. Carries a delay and a gain
-/// relative to the source.
+/// One element of a reverb-tail tap list. Carries a delay, a gain,
+/// and a per-tap exponential decay rate. `decay_k = 0` means the tap
+/// is a literal delayed copy of the source (the old behaviour, useful
+/// for stacking sustained chord-like tones). Positive values shape the
+/// tap into a brief reflection.
 #[derive(Clone, Copy)]
 pub struct Tap {
     pub delay_s: f32,
     pub gain: f32,
+    pub decay_k: f32,
 }
 
 impl Tap {
-    pub fn new(delay_s: f32, gain: f32) -> Self {
-        Self { delay_s, gain }
+    /// Construct a tap with an explicit decay rate.
+    pub fn new(delay_s: f32, gain: f32, decay_k: f32) -> Self {
+        Self {
+            delay_s,
+            gain,
+            decay_k,
+        }
     }
+
+    /// Default reflection decay (1/e at ~80 ms). Used when the script
+    /// calls the two-argument form of `tap`.
+    pub const DEFAULT_DECAY_K: f32 = 12.0;
 }
 
 /// Build a sine wave at `freq_hz`, lasting `duration_s` seconds, with

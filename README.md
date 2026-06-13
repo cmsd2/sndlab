@@ -74,7 +74,7 @@ consumer; an embedded game audio engine is another (see
 | `signal.env(attack_s, decay_s)` | shipped | Attack + exp decay envelope |
 | `signal.gain(linear)` | shipped | Linear amplitude scaling |
 | `mix([sig, ...])` | shipped | Sum signals |
-| `tap(delay_s, gain)` + `signal.with_taps([...])` | shipped | Discrete delay-tap reverb |
+| `tap(delay_s, gain[, decay_k])` + `signal.with_taps([...])` | shipped | Discrete reflection-style reverb (per-tap decay) |
 
 `Status` flips to `shipped` as primitives land. Whenever a row flips,
 the [DSL overview](./book/src/dsl/overview.md) status table and the

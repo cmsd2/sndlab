@@ -30,13 +30,20 @@ pub struct SndlabApp {
 }
 
 const SEED_PATCH: &str = r#"// Press F5 to evaluate and play the first patch.
+//
+// `tap(delay, gain)` uses the default per-tap fast decay (~80 ms)
+// so each tap behaves as a brief reflection of the source. Pass a
+// third argument to override — `tap(delay, gain, 0)` gives a
+// sustained delayed copy of the whole source (useful for chord-
+// stacking but not for reverb tails).
 
 patch("ping", "one_shot",
     sine(330.0, 1.5).env(0.008, 1.4).gain(0.32)
         .with_taps([
-            tap(0.13, 0.55),
-            tap(0.31, 0.38),
-            tap(0.58, 0.26),
+            tap(0.13, 0.7),
+            tap(0.31, 0.5),
+            tap(0.58, 0.35),
+            tap(0.95, 0.22),
         ]));
 "#;
 

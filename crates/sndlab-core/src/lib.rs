@@ -145,6 +145,74 @@ mod tests {
         assert_eq!(names, vec!["b"]);
     }
 
+    /// A tap with a fast decay produces less energy at its tail than
+    /// at its onset — the discriminator between "reflection tap" and
+    /// "sustained copy". A tap with `decay_k = 0` is the legacy
+    /// sustained-copy behaviour. To isolate the tap from the dry
+    /// signal, the source is shorter than the tap delay.
+    #[test]
+    fn tap_decay_shapes_the_tail() {
+        let mut engine = Engine::new().expect("engine init");
+        // Source: 0.4 s. Tap delay: 0.5 s. So the tap plays from
+        // 0.5–0.9 s with the dry already finished, and any energy
+        // we measure inside the tap window is the tap alone.
+        engine
+            .eval(
+                r#"
+                patch("fast", "one_shot",
+                    sine(220.0, 0.4).gain(0.5)
+                        .with_taps([tap(0.5, 1.0)]));
+            "#,
+            )
+            .expect("eval ok");
+        let fast = engine.render("fast").expect("render ok");
+        // 50 ms window at tap onset vs 50 ms window 0.3 s into the
+        // tap. With decay_k = 12 the second window is tiny.
+        let onset_sample = (0.5 * fast.sample_rate as f32) as usize;
+        let early =
+            window_rms(&fast.samples, onset_sample, onset_sample + 2_400);
+        let late = window_rms(
+            &fast.samples,
+            onset_sample + 14_400,
+            onset_sample + 16_800,
+        );
+        assert!(
+            early > 10.0 * late,
+            "fast-decay tap should attenuate sharply: early={early}, late={late}"
+        );
+
+        // decay_k = 0 → sustained copy. The same 0.3-s-in window
+        // should be roughly the source's RMS, not near-zero.
+        engine
+            .eval(
+                r#"
+                patch("sustained", "one_shot",
+                    sine(220.0, 0.4).gain(0.5)
+                        .with_taps([tap(0.5, 1.0, 0.0)]));
+            "#,
+            )
+            .expect("eval ok");
+        let sustained = engine.render("sustained").expect("render ok");
+        let late_sustained = window_rms(
+            &sustained.samples,
+            onset_sample + 14_400,
+            onset_sample + 16_800,
+        );
+        assert!(
+            late_sustained > 10.0 * late,
+            "sustained tap should not attenuate: sustained late={late_sustained}, fast late={late}"
+        );
+    }
+
+    fn window_rms(samples: &[f32], start: usize, end: usize) -> f32 {
+        let end = end.min(samples.len());
+        if end <= start {
+            return 0.0;
+        }
+        let sum_sq: f32 = samples[start..end].iter().map(|s| s * s).sum();
+        (sum_sq / (end - start) as f32).sqrt()
+    }
+
     /// Mixing two short signals produces a buffer the length of the
     /// longer input and contains contributions from both.
     #[test]

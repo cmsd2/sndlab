@@ -212,9 +212,18 @@ fn build_rhai_engine(state: Arc<Mutex<EvalState>>) -> rhai::Engine {
     engine.register_fn("gain", |s: Signal, factor: f64| s.gain(factor as f32));
     engine.register_fn("gain", |s: Signal, factor: i64| s.gain(factor as f32));
 
-    // Tap constructor.
+    // Tap constructors. The two-arg form picks a sensible default
+    // decay so the tap sounds like a brief reflection; the three-arg
+    // form is explicit. `decay_k = 0` opts back into the legacy
+    // "sustained delayed copy" semantics.
     engine.register_fn("tap", |delay_s: f64, gain: f64| {
-        Tap::new(delay_s as f32, gain as f32)
+        Tap::new(delay_s as f32, gain as f32, Tap::DEFAULT_DECAY_K)
+    });
+    engine.register_fn("tap", |delay_s: f64, gain: f64, decay_k: f64| {
+        Tap::new(delay_s as f32, gain as f32, decay_k as f32)
+    });
+    engine.register_fn("tap", |delay_s: f64, gain: f64, decay_k: i64| {
+        Tap::new(delay_s as f32, gain as f32, decay_k as f32)
     });
 
     // Reverb-tap application.
