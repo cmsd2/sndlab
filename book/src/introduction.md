@@ -1,12 +1,13 @@
 # Introduction
 
-**sndlab** is a TUI environment for designing procedural audio in Rust.
-You write *patches* — small Rhai scripts that describe a sound — and
-sndlab evaluates them, plays them through Kira, and shows you everything
-in a terminal alongside a log of what's happening. It's a Strudel-style
-tight iteration loop, but the patches you design here can be embedded
-into shipped Rust binaries with no porting tax: the same crate that
-plays them in the TUI plays them in your game.
+**sndlab** is a graphical environment for designing procedural audio
+in Rust. You write *patches* — small Rhai scripts that describe a
+sound — and sndlab evaluates them, plays them through Kira, shows
+the rendered waveform in a live scope, and logs what's happening
+underneath. It's a Strudel-style tight iteration loop, but the
+patches you design here can be embedded into shipped Rust binaries
+with no porting tax: the same crate that plays them in sndlab plays
+them in your game.
 
 ## What sndlab is for
 
@@ -36,8 +37,9 @@ Two crates:
 
 - **`sndlab-core`** — the embeddable engine: a Rhai interpreter, the
   patch DSL, and Kira-based playback. Library; no UI.
-- **`sndlab`** — the TUI binary: editor, log pane, project model, MCP
-  server. Depends on `sndlab-core`.
+- **`sndlab`** — the GUI binary: an eframe window hosting a
+  syntax-highlighted code editor, a waveform scope, a log pane, the
+  project model, and the MCP server. Depends on `sndlab-core`.
 
 When you ship a game, you embed `sndlab-core` and load `.rhai` patches
 the same way sndlab itself does. There is no "production" version of a
@@ -61,6 +63,6 @@ patch("sonar_ping", "one_shot", || {
 });
 ```
 
-That's all the design tooling needs to know about. The TUI handles
+That's all the design tooling needs to know about. The GUI handles
 evaluating, playing, error reporting, and (optionally) collaborating
 with an AI agent over MCP.

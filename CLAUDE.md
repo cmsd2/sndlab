@@ -13,14 +13,14 @@ DSL reference.
 ## Workspace map
 
 ```
-crates/sndlab-core/   library:  rhai engine + kira/fundsp playback
-crates/sndlab/        binary:   TUI shell + MCP server + project model
+crates/sndlab-core/   library:  rhai engine + kira playback
+crates/sndlab/        binary:   eframe + egui GUI + MCP server + project model
 book/                 mdBook:   user guide and DSL reference
 ```
 
 When in doubt, **engine logic goes in `sndlab-core`**, **UI / project /
 MCP / file I/O goes in `sndlab`**. If a piece of code would be useful
-to a non-TUI consumer (a game, a batch renderer, a test harness),
+to a non-GUI consumer (a game, a batch renderer, a test harness),
 that's a sign it belongs in `sndlab-core`.
 
 ## The discipline: scripting surface changes

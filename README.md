@@ -2,8 +2,9 @@
 
 [![docs](https://github.com/cmsd2/sndlab/actions/workflows/book.yml/badge.svg)](https://cmsd2.github.io/sndlab/)
 
-A TUI sound-design environment for designing procedural audio in Rust.
-Edit Rhai patches in a terminal editor, hear them play through Kira,
+A graphical sound-design environment for designing procedural audio
+in Rust. Edit Rhai patches in a syntax-highlighted code editor, hear
+them play through Kira, see the rendered waveform in a live scope —
 and expose the buffer over MCP so an AI agent (e.g. Claude Code) can
 collaborate on the same script you're looking at.
 
@@ -13,39 +14,40 @@ the same script that designs the sound plays it in the final game.
 
 ## Status
 
-Early development. The workspace compiles; the TUI shell renders.
-Engine, project model, mix model, and MCP server are landing in
-order — see `book/src/SUMMARY.md` for the roadmap of chapters and
-the corresponding implementation tasks.
+Early development. The DSL engine compiles, the GUI renders, the
+scope works, and patches play through Kira. Project model, mix model,
+and MCP server are landing in order — see `book/src/SUMMARY.md` for
+the roadmap of chapters and the corresponding implementation tasks.
 
 ## Quick start
 
 ```sh
-# Linux only — install ALSA dev headers if you don't have them:
+# Linux only — install audio + windowing dev headers:
 #   Debian/Ubuntu:  sudo apt install libasound2-dev pkg-config
 #   Fedora:         sudo dnf install alsa-lib-devel pkgconf
 #   Arch:           sudo pacman -S alsa-lib pkgconf
 
-cargo run -p sndlab
+cargo run -p sndlab --release
 ```
 
-That drops you into the TUI: editor pane on top, status bar in the
-middle, log pane at the bottom. Hotkeys today:
+That opens a window with four panels: a toolbar across the top, the
+code editor in the middle-left, a live scope on the right, and a log
+pane at the bottom. Hotkeys today:
 
 | Key | Action |
 |---|---|
-| `Ctrl+R` | Evaluate the buffer (engine wiring in progress) |
-| `Ctrl+S` | Save (project layer in progress) |
-| `Ctrl+Q` | Quit |
-| any other | Editor input |
+| `F5` | Evaluate the buffer and play the first registered patch |
+| toolbar buttons | Trigger any patch by name |
+
+Quit via the window close button.
 
 ## Workspace layout
 
 ```
 sndlab/
 ├── crates/
-│   ├── sndlab-core/   # library: rhai engine + kira/fundsp backend
-│   └── sndlab/        # binary: TUI + MCP + project model
+│   ├── sndlab-core/   # library: rhai engine + kira playback
+│   └── sndlab/        # binary: eframe + egui GUI + MCP server
 ├── book/              # mdBook source for the user/DSL documentation
 ├── examples/          # example projects (coming with task 12)
 ├── LICENSE            # MIT
@@ -54,7 +56,7 @@ sndlab/
 ```
 
 The split is deliberate: `sndlab-core` is reusable in any Rust
-program that wants to load `.rhai` patches at runtime. The TUI is one
+program that wants to load `.rhai` patches at runtime. The GUI is one
 consumer; an embedded game audio engine is another (see
 [Echo Field integration](./book/src/embedding/echo-field.md)).
 

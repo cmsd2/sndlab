@@ -15,14 +15,9 @@ path = "src/main.rs"
 [dependencies]
 sndlab-core.workspace = true
 
-ratatui.workspace = true
-tui-textarea.workspace = true
-crossterm.workspace = true
-
-rhai.workspace = true
-
-kira.workspace = true
-fundsp.workspace = true
+eframe.workspace = true
+egui.workspace = true
+egui_code_editor.workspace = true
 
 rmcp.workspace = true
 tokio.workspace = true
@@ -30,9 +25,6 @@ tokio.workspace = true
 serde.workspace = true
 ron.workspace = true
 
-syntect.workspace = true
-
 anyhow.workspace = true
-thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

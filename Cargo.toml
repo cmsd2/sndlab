@@ -15,10 +15,16 @@ publish = false
 # consumer that wants to load .rhai patches at runtime.
 sndlab-core = { path = "crates/sndlab-core" }
 
-# TUI
-ratatui = "0.29"
-tui-textarea = { version = "0.7", features = ["crossterm", "search"] }
-crossterm = "0.28"
+# UI: eframe is the window + event loop, egui is the immediate-mode UI,
+# egui_code_editor is the syntax-highlighted editor widget for patches.
+eframe = { version = "0.34", default-features = false, features = [
+    "default_fonts",
+    "wgpu",
+    "x11",
+    "wayland",
+] }
+egui = "0.34"
+egui_code_editor = "0.3"
 
 # Scripting
 rhai = { version = "1", features = ["sync"] }
@@ -34,14 +40,6 @@ tokio = { version = "1", features = ["full"] }
 # Serialisation (project manifests)
 serde = { version = "1", features = ["derive"] }
 ron = "0.8"
-
-# Syntax highlighting
-syntect = { version = "5", default-features = false, features = [
-    "default-syntaxes",
-    "default-themes",
-    "regex-fancy",
-    "parsing",
-] }
 
 # Errors + diagnostics
 anyhow = "1"
