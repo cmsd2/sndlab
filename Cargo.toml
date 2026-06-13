@@ -1,0 +1,56 @@
+[workspace]
+resolver = "2"
+members = ["crates/sndlab"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Chris Dawes <cmsd2@cantab.net>"]
+license = "MIT"
+repository = "https://github.com/cmsd2/sndlab"
+publish = false
+
+[workspace.dependencies]
+# TUI
+ratatui = "0.29"
+tui-textarea = { version = "0.7", features = ["crossterm", "search"] }
+crossterm = "0.28"
+
+# Scripting
+rhai = { version = "1", features = ["sync"] }
+
+# Audio
+kira = "0.12"
+fundsp = "0.23"
+
+# MCP server
+rmcp = { version = "1", features = ["server", "transport-streamable-http-server"] }
+tokio = { version = "1", features = ["full"] }
+
+# Serialisation (project manifests)
+serde = { version = "1", features = ["derive"] }
+ron = "0.8"
+
+# Syntax highlighting
+syntect = { version = "5", default-features = false, features = [
+    "default-syntaxes",
+    "default-themes",
+    "regex-fancy",
+    "parsing",
+] }
+
+# Errors + diagnostics
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

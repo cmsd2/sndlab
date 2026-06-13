@@ -1,0 +1,36 @@
+[package]
+name = "sndlab"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "A TUI sound-design lab with live Rhai scripting, Kira playback, and an MCP server for live AI collaboration."
+
+[[bin]]
+name = "sndlab"
+path = "src/main.rs"
+
+[dependencies]
+ratatui.workspace = true
+tui-textarea.workspace = true
+crossterm.workspace = true
+
+rhai.workspace = true
+
+kira.workspace = true
+fundsp.workspace = true
+
+rmcp.workspace = true
+tokio.workspace = true
+
+serde.workspace = true
+ron.workspace = true
+
+syntect.workspace = true
+
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
