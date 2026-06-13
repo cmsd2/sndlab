@@ -178,6 +178,39 @@ pub fn sine(freq_hz: f32, duration_s: f32) -> Signal {
     Signal::new(out)
 }
 
+/// Build a linear-frequency-modulated chirp (LFM) sweeping from
+/// `start_hz` to `end_hz` over `duration_s` seconds. Amplitude is
+/// unit; apply `.gain()` to scale.
+///
+/// The instantaneous frequency varies linearly with time:
+///   f(t) = start_hz + (end_hz - start_hz) * (t / duration_s)
+/// The phase is the integral:
+///   φ(t) = 2π · (start_hz · t + 0.5 · k · t²)   where k = (end-start)/dur
+///
+/// Why this exists: a pure sine is monochromatic, so summed delayed
+/// copies (taps) lock into a stable comb-filter pattern with
+/// audible sustained nulls. A chirp is broadband across the sweep,
+/// so the delay-induced interference moves through frequencies and
+/// the result sounds like reverb rather than a phaser. The sonar
+/// ping seed patch uses this for exactly that reason.
+pub fn chirp(start_hz: f32, end_hz: f32, duration_s: f32) -> Signal {
+    let n = (duration_s * SAMPLE_RATE_F).max(0.0) as usize;
+    let mut out = Vec::with_capacity(n);
+    let inv_sr = 1.0 / SAMPLE_RATE_F;
+    let k = if duration_s > 0.0 {
+        (end_hz - start_hz) / duration_s
+    } else {
+        0.0
+    };
+    let tau = std::f32::consts::TAU;
+    for i in 0..n {
+        let t = i as f32 * inv_sr;
+        let phase = tau * (start_hz * t + 0.5 * k * t * t);
+        out.push(phase.sin());
+    }
+    Signal::new(out)
+}
+
 /// What kind of noise to generate. Pink and brown are derived from
 /// white via simple integrators; not exactly textbook-pink but close
 /// enough for game ambience.

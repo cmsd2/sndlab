@@ -70,6 +70,7 @@ consumer; an embedded game audio engine is another (see
 |---|---|---|
 | `patch(name, role, signal)` | shipped | Register a named patch |
 | `sine(freq_hz, dur_s)` | shipped | Sine oscillator |
+| `chirp(start_hz, end_hz, dur_s)` | shipped | Linear-FM sine sweep |
 | `noise(kind, dur_s)` | shipped | Noise generator (white/pink/brown) |
 | `signal.env(attack_s, decay_s)` | shipped | Attack + exp decay envelope |
 | `signal.gain(linear)` | shipped | Linear amplitude scaling |

@@ -213,6 +213,61 @@ mod tests {
         (sum_sq / (end - start) as f32).sqrt()
     }
 
+    /// A chirp degenerates to a sine when start_hz == end_hz. The
+    /// generated buffers should be sample-equivalent.
+    #[test]
+    fn chirp_with_constant_freq_equals_sine() {
+        let mut engine = Engine::new().expect("engine init");
+        engine
+            .eval(
+                r#"
+                patch("c", "one_shot", chirp(440.0, 440.0, 0.5));
+                patch("s", "one_shot", sine(440.0, 0.5));
+            "#,
+            )
+            .expect("eval ok");
+        let c = engine.render("c").expect("render c");
+        let s = engine.render("s").expect("render s");
+        assert_eq!(c.samples.len(), s.samples.len());
+        let max_err = c
+            .samples
+            .iter()
+            .zip(s.samples.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(max_err < 1e-3, "chirp/sine match: max_err = {max_err}");
+    }
+
+    /// An upward chirp has more zero-crossings per unit time in the
+    /// late portion than the early portion — the operational
+    /// definition of "frequency rises over the buffer."
+    #[test]
+    fn chirp_frequency_increases_over_time() {
+        let mut engine = Engine::new().expect("engine init");
+        engine
+            .eval(
+                r#"
+                patch("sweep", "one_shot", chirp(200.0, 800.0, 1.0));
+            "#,
+            )
+            .expect("eval ok");
+        let buf = engine.render("sweep").expect("render ok");
+        let n = buf.samples.len();
+        let early = zero_crossings(&buf.samples[0..n / 8]);
+        let late = zero_crossings(&buf.samples[7 * n / 8..n]);
+        assert!(
+            late > 3 * early,
+            "late should have ~4× the zero crossings of early (200 → 800 Hz): early={early}, late={late}"
+        );
+    }
+
+    fn zero_crossings(samples: &[f32]) -> usize {
+        samples
+            .windows(2)
+            .filter(|w| (w[0] >= 0.0) != (w[1] >= 0.0))
+            .count()
+    }
+
     /// Mixing two short signals produces a buffer the length of the
     /// longer input and contains contributions from both.
     #[test]

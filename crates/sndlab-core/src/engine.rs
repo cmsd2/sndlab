@@ -182,6 +182,28 @@ fn build_rhai_engine(state: Arc<Mutex<EvalState>>) -> rhai::Engine {
         signal::sine(freq_hz as f32, duration_s as f32)
     });
 
+    // Linear FM chirp. Rhai needs every numeric type combination
+    // spelled out individually; lambdas keep the boilerplate tight.
+    let chirp_fn = |start: f32, end: f32, dur: f32| signal::chirp(start, end, dur);
+    engine.register_fn("chirp", move |s: f64, e: f64, d: f64| {
+        chirp_fn(s as f32, e as f32, d as f32)
+    });
+    engine.register_fn("chirp", move |s: i64, e: f64, d: f64| {
+        chirp_fn(s as f32, e as f32, d as f32)
+    });
+    engine.register_fn("chirp", move |s: f64, e: i64, d: f64| {
+        chirp_fn(s as f32, e as f32, d as f32)
+    });
+    engine.register_fn("chirp", move |s: i64, e: i64, d: f64| {
+        chirp_fn(s as f32, e as f32, d as f32)
+    });
+    engine.register_fn("chirp", move |s: f64, e: f64, d: i64| {
+        chirp_fn(s as f32, e as f32, d as f32)
+    });
+    engine.register_fn("chirp", move |s: i64, e: i64, d: i64| {
+        chirp_fn(s as f32, e as f32, d as f32)
+    });
+
     engine.register_fn(
         "noise",
         |kind: ImmutableString, duration_s: f64| -> std::result::Result<Signal, Box<EvalAltResult>> {

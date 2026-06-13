@@ -9,6 +9,7 @@ use sndlab_core::{Buffer, Engine};
 
 use crate::log::LogPane;
 use crate::mcp::{Command, Mailbox};
+use crate::spectrum;
 
 pub struct SndlabApp {
     /// The editor buffer. egui_code_editor mutates this in place.
@@ -19,8 +20,12 @@ pub struct SndlabApp {
     pub theme: ColorTheme,
     pub log: LogPane,
     pub engine: Engine,
-    /// The most recently rendered patch buffer — what the scope shows.
+    /// The most recently rendered patch buffer — what the scope's
+    /// upper pane shows.
     pub last_buffer: Option<Buffer>,
+    /// FFT magnitudes of `last_buffer`, computed when it changes.
+    /// What the scope's lower pane shows.
+    pub last_spectrum: Option<Vec<f32>>,
     /// Endpoint string for the status bar.
     pub mcp_endpoint: String,
     pub filename: String,
@@ -31,14 +36,15 @@ pub struct SndlabApp {
 
 const SEED_PATCH: &str = r#"// Press F5 to evaluate and play the first patch.
 //
-// `tap(delay, gain)` uses the default per-tap fast decay (~80 ms)
-// so each tap behaves as a brief reflection of the source. Pass a
-// third argument to override — `tap(delay, gain, 0)` gives a
-// sustained delayed copy of the whole source (useful for chord-
-// stacking but not for reverb tails).
+// chirp(start_hz, end_hz, dur_s) sweeps frequency over the buffer.
+// A swept source is broadband, so summed delayed copies (taps) no
+// longer lock into a sustained comb-filter null at any single
+// frequency — the interference moves with time and the result
+// reads as reverb rather than phaser. The scope's lower pane shows
+// the spread of frequencies the chirp covers.
 
 patch("ping", "one_shot",
-    sine(330.0, 1.5).env(0.008, 1.4).gain(0.32)
+    chirp(280.0, 400.0, 1.0).env(0.008, 1.4).gain(0.32)
         .with_taps([
             tap(0.13, 0.7),
             tap(0.31, 0.5),
@@ -86,6 +92,7 @@ impl SndlabApp {
             log,
             engine,
             last_buffer: None,
+            last_spectrum: None,
             mcp_endpoint: format!("http://127.0.0.1:{MCP_PORT}/mcp"),
             filename: "patches.rhai".into(),
             mailbox: Some(mailbox),
@@ -133,7 +140,7 @@ impl SndlabApp {
     /// MCP `play` tool). Reports through the log and last_error.
     pub fn play_by_name(&mut self, name: &str) {
         if let Ok(buf) = self.engine.render(name) {
-            self.last_buffer = Some(buf);
+            self.set_last_buffer(buf);
         }
         match self.engine.play(name) {
             Ok(()) => {
@@ -154,6 +161,13 @@ impl SndlabApp {
                 m.last_error = err;
             }
         }
+    }
+
+    /// Update the cached buffer and (re)compute its spectrum. Single
+    /// site so the spectrum is always in sync with the waveform.
+    fn set_last_buffer(&mut self, buf: Buffer) {
+        self.last_spectrum = Some(spectrum::compute(&buf));
+        self.last_buffer = Some(buf);
     }
 
     /// Compile the buffer through Rhai, then auto-play the first

@@ -3537,6 +3537,7 @@ dependencies = [
  "egui_code_editor",
  "rmcp",
  "ron",
+ "rustfft",
  "schemars",
  "serde",
  "sndlab-core",

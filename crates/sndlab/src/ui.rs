@@ -110,7 +110,11 @@ fn log_pane(ui: &mut egui::Ui, app: &SndlabApp) {
 
 fn scope_pane(ui: &mut egui::Ui, app: &SndlabApp) {
     ui.label(RichText::new("scope").color(Color32::GRAY).small());
-    scope::show(ui, app.last_buffer.as_ref());
+    scope::show(
+        ui,
+        app.last_buffer.as_ref(),
+        app.last_spectrum.as_deref(),
+    );
 }
 
 fn editor(ui: &mut egui::Ui, app: &mut SndlabApp) {

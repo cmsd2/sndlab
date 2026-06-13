@@ -12,6 +12,7 @@ the engine renders it to a mono sample buffer.
 |---|---|---|
 | [`patch`](./patch.md) | shipped | Register a named patch. |
 | [`sine`](./sine.md) | shipped | A sine wave at a given frequency and duration. |
+| [`chirp`](./chirp.md) | shipped | Linear-FM sine sweep — broadband source for reverb-style taps. |
 | [`noise`](./noise.md) | shipped | White / pink / brown noise. |
 | [`env`](./env.md) | shipped | Attack + exponential decay applied to a signal. |
 | [`gain`](./gain.md) | shipped | Linear amplitude scaling. |

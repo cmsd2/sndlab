@@ -1,35 +1,57 @@
-//! Waveform scope widget. Renders the last-played buffer as a
-//! peak-to-peak vertical line per pixel column — the classic "what
-//! does this sound look like" oscilloscope view, downsampled to fit
-//! the available width.
+//! Scope widget. Split vertically:
+//!
+//! - Top half: time-domain peak-to-peak waveform of the last rendered
+//!   buffer.
+//! - Bottom half: magnitude spectrum (FFT) of the same buffer, with
+//!   linear frequency axis and dB-scaled magnitude.
 //!
 //! This is the primary motivation for the eframe+egui pivot: in a
 //! terminal we could only approximate this with Unicode box-drawing
-//! characters; here we get smooth lines at any resolution.
+//! characters; here we get smooth lines at any resolution and the
+//! spectral view shows the chirp's bandwidth at a glance.
 
-use egui::{Align2, Color32, FontId, Pos2, Sense, Stroke, Ui};
+use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use sndlab_core::Buffer;
 
-/// Colours tuned against the dark background — bright phosphor-green
-/// for the waveform, subtle grid, dim foreground for the axis label.
 const COLOR_BG: Color32 = Color32::from_rgb(10, 18, 14);
 const COLOR_WAVE: Color32 = Color32::from_rgb(140, 230, 180);
+const COLOR_SPEC: Color32 = Color32::from_rgb(180, 200, 240);
 const COLOR_AXIS: Color32 = Color32::from_rgb(40, 70, 55);
 const COLOR_LABEL: Color32 = Color32::from_rgb(120, 140, 130);
 
-/// Draw the waveform of `buffer` into the remaining ui area. If
-/// `buffer` is `None`, draw an empty scope with a placeholder.
-pub fn show(ui: &mut Ui, buffer: Option<&Buffer>) {
-    let size = ui.available_size();
-    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-    let painter = ui.painter_at(rect);
+/// Upper limit of the spectrum display. 6 kHz is wide enough to show
+/// everything the DSL realistically generates (sonar pings, hull
+/// creaks, mid-range ambience) without wasting pixels on empty bins.
+const SPECTRUM_MAX_HZ: f32 = 6_000.0;
+/// dB range shown vertically in the spectrum. -80 dB is below any
+/// useful signal; 0 dB is at the top of the panel.
+const SPECTRUM_FLOOR_DB: f32 = -80.0;
 
+/// Draw the split scope into `ui`. The waveform and spectrum each get
+/// half the vertical space.
+pub fn show(ui: &mut Ui, buffer: Option<&Buffer>, spectrum: Option<&[f32]>) {
+    let size = ui.available_size();
+    let half_h = (size.y * 0.5).floor();
+    let wave_size = Vec2::new(size.x, half_h);
+    let spec_size = Vec2::new(size.x, size.y - half_h);
+
+    let (wave_rect, _) = ui.allocate_exact_size(wave_size, Sense::hover());
+    let (spec_rect, _) = ui.allocate_exact_size(spec_size, Sense::hover());
+
+    draw_waveform(ui, wave_rect, buffer);
+    draw_spectrum(ui, spec_rect, buffer, spectrum);
+}
+
+fn draw_waveform(ui: &Ui, rect: Rect, buffer: Option<&Buffer>) {
+    let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, COLOR_BG);
 
-    // Zero-axis line.
     let center_y = rect.center().y;
     painter.line_segment(
-        [Pos2::new(rect.left(), center_y), Pos2::new(rect.right(), center_y)],
+        [
+            Pos2::new(rect.left(), center_y),
+            Pos2::new(rect.right(), center_y),
+        ],
         Stroke::new(1.0, COLOR_AXIS),
     );
 
@@ -54,10 +76,6 @@ pub fn show(ui: &mut Ui, buffer: Option<&Buffer>) {
         return;
     }
 
-    // Downsample: one pixel column per output point, each showing
-    // the min..max range of the underlying sample window. This is
-    // the canonical scope render for buffers much longer than the
-    // pixel count.
     let n_columns = rect.width() as usize;
     if n_columns == 0 {
         return;
@@ -72,21 +90,18 @@ pub fn show(ui: &mut Ui, buffer: Option<&Buffer>) {
         if window.is_empty() {
             continue;
         }
-        let (lo, hi) = window.iter().fold((0.0_f32, 0.0_f32), |(a, b), s| {
-            (a.min(*s), b.max(*s))
-        });
+        let (lo, hi) = window
+            .iter()
+            .fold((0.0_f32, 0.0_f32), |(a, b), s| (a.min(*s), b.max(*s)));
         let x = rect.left() + i as f32 + 0.5;
         let y_lo = center_y - lo * amp_scale;
         let y_hi = center_y - hi * amp_scale;
-        // A 1-pixel-thick vertical segment per column reads as a
-        // smooth envelope at the buffer's actual resolution.
         painter.line_segment(
             [Pos2::new(x, y_hi), Pos2::new(x, y_lo)],
             Stroke::new(1.0, COLOR_WAVE),
         );
     }
 
-    // Footer: duration + sample rate.
     let info = format!(
         "{:.2} s · {} samples · {} Hz",
         buf.samples.len() as f32 / buf.sample_rate as f32,
@@ -98,6 +113,106 @@ pub fn show(ui: &mut Ui, buffer: Option<&Buffer>) {
         Align2::RIGHT_BOTTOM,
         info,
         FontId::monospace(11.0),
+        COLOR_LABEL,
+    );
+}
+
+fn draw_spectrum(ui: &Ui, rect: Rect, buffer: Option<&Buffer>, spectrum: Option<&[f32]>) {
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, COLOR_BG);
+
+    // Top border so the eye reads two stacked panels even at small
+    // sizes.
+    painter.line_segment(
+        [Pos2::new(rect.left(), rect.top()), Pos2::new(rect.right(), rect.top())],
+        Stroke::new(1.0, COLOR_AXIS),
+    );
+
+    let (Some(buf), Some(spec)) = (buffer, spectrum) else {
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            "spectrum appears after F5",
+            FontId::monospace(12.0),
+            COLOR_LABEL,
+        );
+        return;
+    };
+    if spec.is_empty() || buf.samples.is_empty() {
+        return;
+    }
+
+    // Frequency-axis grid lines + labels: every 1 kHz from 0 to the
+    // spectrum's upper limit.
+    let plot_h = rect.height();
+    for f in (0..=(SPECTRUM_MAX_HZ as i32)).step_by(1_000) {
+        let x = rect.left() + (f as f32 / SPECTRUM_MAX_HZ) * rect.width();
+        painter.line_segment(
+            [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
+            Stroke::new(0.5, COLOR_AXIS),
+        );
+        if f > 0 && (f % 2_000) == 0 {
+            painter.text(
+                Pos2::new(x + 2.0, rect.bottom() - 2.0),
+                Align2::LEFT_BOTTOM,
+                format!("{} kHz", f / 1_000),
+                FontId::monospace(10.0),
+                COLOR_LABEL,
+            );
+        }
+    }
+
+    // Each bin of `spec` covers (sample_rate / 2) / spec.len() Hz.
+    // We render up to SPECTRUM_MAX_HZ.
+    let nyquist = buf.sample_rate as f32 * 0.5;
+    let bins_per_hz = spec.len() as f32 / nyquist;
+    let max_bin = (SPECTRUM_MAX_HZ * bins_per_hz).min(spec.len() as f32) as usize;
+    if max_bin == 0 {
+        return;
+    }
+
+    let n_columns = rect.width() as usize;
+    if n_columns == 0 {
+        return;
+    }
+    // Max magnitude across the visible band — used as our 0 dB
+    // reference so the plot autoscales to whatever's loudest.
+    let max_mag = spec[..max_bin]
+        .iter()
+        .copied()
+        .fold(0.0_f32, f32::max)
+        .max(1e-12);
+
+    for i in 0..n_columns {
+        let start_bin = i * max_bin / n_columns;
+        let end_bin = ((i + 1) * max_bin / n_columns).max(start_bin + 1);
+        let window = &spec[start_bin..end_bin.min(spec.len())];
+        if window.is_empty() {
+            continue;
+        }
+        let bin_max = window.iter().copied().fold(0.0_f32, f32::max);
+        if bin_max <= 0.0 {
+            continue;
+        }
+        let db = 20.0 * (bin_max / max_mag).log10();
+        let normalised = ((db - SPECTRUM_FLOOR_DB) / -SPECTRUM_FLOOR_DB).clamp(0.0, 1.0);
+        let h = normalised * plot_h;
+        let x = rect.left() + i as f32 + 0.5;
+        painter.line_segment(
+            [Pos2::new(x, rect.bottom()), Pos2::new(x, rect.bottom() - h)],
+            Stroke::new(1.0, COLOR_SPEC),
+        );
+    }
+
+    painter.text(
+        Pos2::new(rect.right() - 6.0, rect.top() + 4.0),
+        Align2::RIGHT_TOP,
+        format!(
+            "spectrum · 0 – {:.0} kHz · {:.0} dB floor",
+            SPECTRUM_MAX_HZ / 1000.0,
+            SPECTRUM_FLOOR_DB
+        ),
+        FontId::monospace(10.0),
         COLOR_LABEL,
     );
 }

@@ -18,6 +18,7 @@ sndlab-core.workspace = true
 eframe.workspace = true
 egui.workspace = true
 egui_code_editor.workspace = true
+rustfft.workspace = true
 
 rmcp.workspace = true
 tokio.workspace = true

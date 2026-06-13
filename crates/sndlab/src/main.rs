@@ -9,6 +9,7 @@ mod app;
 mod log;
 mod mcp;
 mod scope;
+mod spectrum;
 mod ui;
 
 use crate::app::SndlabApp;

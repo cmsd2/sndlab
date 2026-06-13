@@ -26,6 +26,9 @@ eframe = { version = "0.34", default-features = false, features = [
 egui = "0.34"
 egui_code_editor = "0.3"
 
+# FFT for the scope's spectral view. Pure Rust, no native deps.
+rustfft = "6"
+
 # Scripting
 rhai = { version = "1", features = ["sync"] }
 

@@ -20,6 +20,7 @@
 - [Overview](./dsl/overview.md)
 - [`patch`](./dsl/patch.md)
 - [`sine`](./dsl/sine.md)
+- [`chirp`](./dsl/chirp.md)
 - [`noise`](./dsl/noise.md)
 - [`env`](./dsl/env.md)
 - [`gain`](./dsl/gain.md)
