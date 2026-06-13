@@ -2,6 +2,8 @@
 
 [![docs](https://github.com/cmsd2/sndlab/actions/workflows/book.yml/badge.svg)](https://cmsd2.github.io/sndlab/)
 
+![sndlab — toolbar with patch trigger buttons, syntax-highlighted code editor on the left, scope on the right showing the rendered waveform above the FFT spectrum with an overlaid reference sample, log pane at the bottom.](docs/media/sndlab.png)
+
 A graphical sound-design environment for designing procedural audio
 in Rust. Edit Rhai patches in a syntax-highlighted code editor, hear
 them play through Kira, see the rendered waveform in a live scope —

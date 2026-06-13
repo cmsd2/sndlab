@@ -9,11 +9,14 @@ use sndlab_core::{Buffer, Engine};
 
 use crate::log::LogPane;
 use crate::mcp::{Command, Mailbox};
+use crate::project::Project;
 use crate::spectrum;
 
 pub struct SndlabApp {
-    /// The editor buffer. egui_code_editor mutates this in place.
-    pub code: String,
+    /// The currently-loaded project. Always present — at startup we
+    /// build an in-memory "untitled" project so the user has
+    /// something to edit and the editor pane is never blank.
+    pub project: Project,
     /// What egui_code_editor uses for syntax highlighting. Rust is
     /// close enough to Rhai visually for now.
     pub syntax: Syntax,
@@ -35,7 +38,6 @@ pub struct SndlabApp {
     pub reference_name: Option<String>,
     /// Endpoint string for the status bar.
     pub mcp_endpoint: String,
-    pub filename: String,
     /// Shared state with the MCP server thread. `None` if the MCP
     /// server failed to start; the app then runs single-user.
     pub mailbox: Option<Arc<Mutex<Mailbox>>>,
@@ -85,15 +87,17 @@ impl SndlabApp {
             let m = mailbox.clone();
             crate::mcp::spawn_server(m, MCP_PORT);
         }
+        let project = Project::unsaved("untitled", SEED_PATCH.to_string());
         // Seed the mailbox snapshot so an MCP client that connects
         // before the first frame draws still sees current state.
         if let Ok(mut m) = mailbox.lock() {
-            m.current_buffer = SEED_PATCH.to_string();
+            m.current_buffer = project.active_buffer().to_string();
         }
         log.info(format!("MCP server at http://127.0.0.1:{MCP_PORT}/mcp"));
+        log.info("starting with an unsaved project — Open... or Save As... to persist");
 
         Self {
-            code: SEED_PATCH.to_string(),
+            project,
             syntax: Syntax::rust(),
             theme: ColorTheme::AYU_DARK,
             log,
@@ -104,8 +108,76 @@ impl SndlabApp {
             reference_spectrum: None,
             reference_name: None,
             mcp_endpoint: format!("http://127.0.0.1:{MCP_PORT}/mcp"),
-            filename: "patches.rhai".into(),
             mailbox: Some(mailbox),
+        }
+    }
+
+    /// Open a project from a directory picker. Looks for a
+    /// `project.ron` first; falls back to "every `.rhai` in the
+    /// directory" if no manifest exists. Errors land in the log.
+    pub fn pick_and_open_project(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Open project directory")
+            .pick_folder()
+        else {
+            return;
+        };
+        let manifest_present = path.join("project.ron").is_file();
+        let result = if manifest_present {
+            Project::open(&path)
+        } else {
+            Project::open_directory(&path)
+        };
+        match result {
+            Ok(project) => {
+                let name = project.manifest.name.clone();
+                let n = project.scripts.len();
+                self.project = project;
+                self.log.info(format!(
+                    "opened project '{name}' ({n} script{})",
+                    if n == 1 { "" } else { "s" }
+                ));
+            }
+            Err(e) => {
+                self.log.error(format!("open project failed: {e}"));
+            }
+        }
+    }
+
+    /// Save the current project. Falls through to Save As... if the
+    /// project has no root directory yet.
+    pub fn save_project(&mut self) {
+        if self.project.root.is_none() {
+            self.save_project_as();
+            return;
+        }
+        match self.project.save() {
+            Ok(()) => self.log.info(format!(
+                "saved {}",
+                self.project
+                    .root
+                    .as_ref()
+                    .and_then(|p| p.to_str())
+                    .unwrap_or("?")
+            )),
+            Err(e) => self.log.error(format!("save failed: {e}")),
+        }
+    }
+
+    /// Pick a destination directory and save the project there. Sets
+    /// the project's root so subsequent saves go to the same place.
+    pub fn save_project_as(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Save project as")
+            .pick_folder()
+        else {
+            return;
+        };
+        match self.project.save_to(&path) {
+            Ok(()) => self
+                .log
+                .info(format!("saved {}", path.display())),
+            Err(e) => self.log.error(format!("save failed: {e}")),
         }
     }
 
@@ -131,7 +203,7 @@ impl SndlabApp {
         for cmd in pending {
             match cmd {
                 Command::SetBuffer(content) => {
-                    self.code = content;
+                    self.project.set_active_buffer(content);
                     self.log.info("MCP applied buffer edit");
                 }
                 Command::Eval => self.eval_and_play(),
@@ -139,10 +211,13 @@ impl SndlabApp {
             }
         }
 
-        // Publish current state back to the mailbox.
+        // Publish current state back to the mailbox. The "current
+        // buffer" the MCP sees is the active script — the AI edits
+        // whichever file the user is looking at.
         let patches_snapshot = self.engine.patches().to_vec();
+        let active_buffer = self.project.active_buffer().to_string();
         let mut m = mailbox.lock().unwrap();
-        m.current_buffer = self.code.clone();
+        m.current_buffer = active_buffer;
         m.current_patches = patches_snapshot;
     }
 
@@ -219,10 +294,13 @@ impl SndlabApp {
         }
     }
 
-    /// Compile the buffer through Rhai, then auto-play the first
-    /// patch and capture its rendered buffer for the scope.
+    /// Compile every script in the project through Rhai (as a single
+    /// concatenated source so the patch namespace is shared across
+    /// files), then auto-play the first patch and capture its
+    /// rendered buffer for the scope.
     pub fn eval_and_play(&mut self) {
-        match self.engine.eval(&self.code) {
+        let source = self.project.concatenated_source();
+        match self.engine.eval(&source) {
             Ok(summary) => {
                 self.log.info(format!(
                     "eval ok — {} patch(es): [{}]",

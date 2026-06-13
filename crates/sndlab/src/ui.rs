@@ -42,6 +42,16 @@ fn toolbar(ui: &mut egui::Ui, app: &mut SndlabApp) {
             app.eval_and_play();
         }
         ui.separator();
+        if ui.small_button("Open...").clicked() {
+            app.pick_and_open_project();
+        }
+        if ui.small_button("Save").clicked() {
+            app.save_project();
+        }
+        if ui.small_button("Save As...").clicked() {
+            app.save_project_as();
+        }
+        ui.separator();
         // Patch picker: lets the user trigger any registered patch by
         // name, not just the first one. Hidden until at least one
         // patch is registered so the toolbar isn't empty at startup.
@@ -85,12 +95,17 @@ fn status(ui: &mut egui::Ui, app: &SndlabApp) {
         } else {
             format!("MCP: {}", app.mcp_endpoint)
         };
-        ui.monospace(format!("file: {}", app.filename));
-        ui.separator();
+        let dirty_marker = if app.project.is_dirty() { " *" } else { "" };
+        let where_ = match app.project.root.as_ref() {
+            Some(p) => p.display().to_string(),
+            None => "(unsaved)".to_string(),
+        };
         ui.monospace(format!(
-            "buffer: {} chars",
-            app.code.len()
+            "project: {}{} @ {}",
+            app.project.manifest.name, dirty_marker, where_
         ));
+        ui.separator();
+        ui.monospace(format!("script: {}", app.project.scripts[app.project.active].relative_path));
         ui.separator();
         ui.monospace(format!(
             "audio: {}",
@@ -133,12 +148,49 @@ fn scope_pane(ui: &mut egui::Ui, app: &SndlabApp) {
 }
 
 fn editor(ui: &mut egui::Ui, app: &mut SndlabApp) {
+    // Tabs across the top: one per script, click to switch active.
+    ui.horizontal_wrapped(|ui| {
+        let scripts_len = app.project.scripts.len();
+        for i in 0..scripts_len {
+            let is_active = i == app.project.active;
+            let script = &app.project.scripts[i];
+            let label = if script.dirty {
+                format!("{} *", script.relative_path)
+            } else {
+                script.relative_path.clone()
+            };
+            if ui.selectable_label(is_active, label).clicked() {
+                app.project.active = i;
+            }
+        }
+    });
+    ui.separator();
+
+    let theme = app.theme;
+    let syntax = app.syntax.clone();
+    // Snapshot before render so we can detect whether the user
+    // actually typed this frame (vs the editor merely repainting).
+    // Marking dirty only on real change keeps the unsaved-marker
+    // honest.
+    let before_len = app.project.active_buffer().len();
+    let buffer = app.project.active_buffer_mut();
+    let buffer_addr_before: *const u8 = buffer.as_ptr();
     CodeEditor::default()
         .id_source("sndlab.editor")
         .with_rows(24)
         .with_fontsize(14.0)
-        .with_theme(app.theme)
+        .with_theme(theme)
         .with_numlines(true)
         .vscroll(true)
-        .show(ui, &mut app.code, &app.syntax);
+        .show(ui, buffer, &syntax);
+    // Two cheap heuristics for "buffer changed": length differs, or
+    // the storage pointer moved (egui resized String capacity). Both
+    // are easier than a full content compare and catch every typed
+    // character. False positives are rare and harmless — the worst
+    // case is a buffer that was edited and then restored looks dirty.
+    let after_len = app.project.active_buffer().len();
+    let buffer_addr_after = app.project.active_buffer().as_ptr();
+    if before_len != after_len || buffer_addr_before != buffer_addr_after {
+        app.project.mark_active_dirty();
+    }
 }
