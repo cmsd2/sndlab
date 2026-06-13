@@ -268,6 +268,40 @@ mod tests {
             .count()
     }
 
+    /// A lowpass at 5 kHz passes a 1 kHz sine intact and attenuates a
+    /// 10 kHz sine heavily. Inverse for highpass.
+    #[test]
+    fn lowpass_and_highpass_separate_bands() {
+        let mut engine = Engine::new().expect("engine init");
+        engine
+            .eval(
+                r#"
+                patch("lp_pass", "one_shot", sine(1000.0, 0.5).lowpass(5000.0, 0.707));
+                patch("lp_cut",  "one_shot", sine(10000.0, 0.5).lowpass(5000.0, 0.707));
+                patch("hp_pass", "one_shot", sine(10000.0, 0.5).highpass(5000.0, 0.707));
+                patch("hp_cut",  "one_shot", sine(1000.0, 0.5).highpass(5000.0, 0.707));
+            "#,
+            )
+            .expect("eval ok");
+        let skip = 4_800;
+        let lp_pass = engine.render("lp_pass").unwrap();
+        let lp_cut = engine.render("lp_cut").unwrap();
+        let hp_pass = engine.render("hp_pass").unwrap();
+        let hp_cut = engine.render("hp_cut").unwrap();
+        let lp_pass_rms = window_rms(&lp_pass.samples, skip, lp_pass.samples.len());
+        let lp_cut_rms = window_rms(&lp_cut.samples, skip, lp_cut.samples.len());
+        let hp_pass_rms = window_rms(&hp_pass.samples, skip, hp_pass.samples.len());
+        let hp_cut_rms = window_rms(&hp_cut.samples, skip, hp_cut.samples.len());
+        assert!(
+            lp_pass_rms > 5.0 * lp_cut_rms,
+            "lowpass at 5k: 1k should pass, 10k should cut. pass={lp_pass_rms}, cut={lp_cut_rms}"
+        );
+        assert!(
+            hp_pass_rms > 5.0 * hp_cut_rms,
+            "highpass at 5k: 10k should pass, 1k should cut. pass={hp_pass_rms}, cut={hp_cut_rms}"
+        );
+    }
+
     /// A bandpass at the source's centre frequency passes the signal
     /// (after a brief biquad transient); the same filter applied to a
     /// sine well outside the passband attenuates dramatically.

@@ -25,6 +25,8 @@
 - [`env`](./dsl/env.md)
 - [`gain`](./dsl/gain.md)
 - [`bandpass`](./dsl/bandpass.md)
+- [`lowpass`](./dsl/lowpass.md)
+- [`highpass`](./dsl/highpass.md)
 - [`mix`](./dsl/mix.md)
 - [`tap`](./dsl/tap.md)
 

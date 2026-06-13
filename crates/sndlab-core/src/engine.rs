@@ -249,6 +249,34 @@ fn build_rhai_engine(state: Arc<Mutex<EvalState>>) -> rhai::Engine {
         s.bandpass(center as f32, q as f32)
     });
 
+    // Biquad lowpass / highpass. q ≈ 0.707 is Butterworth (flat
+    // passband); higher q creates resonance at the cutoff knee.
+    engine.register_fn("lowpass", |s: Signal, cutoff: f64, q: f64| {
+        s.lowpass(cutoff as f32, q as f32)
+    });
+    engine.register_fn("lowpass", |s: Signal, cutoff: i64, q: f64| {
+        s.lowpass(cutoff as f32, q as f32)
+    });
+    engine.register_fn("lowpass", |s: Signal, cutoff: f64, q: i64| {
+        s.lowpass(cutoff as f32, q as f32)
+    });
+    engine.register_fn("lowpass", |s: Signal, cutoff: i64, q: i64| {
+        s.lowpass(cutoff as f32, q as f32)
+    });
+
+    engine.register_fn("highpass", |s: Signal, cutoff: f64, q: f64| {
+        s.highpass(cutoff as f32, q as f32)
+    });
+    engine.register_fn("highpass", |s: Signal, cutoff: i64, q: f64| {
+        s.highpass(cutoff as f32, q as f32)
+    });
+    engine.register_fn("highpass", |s: Signal, cutoff: f64, q: i64| {
+        s.highpass(cutoff as f32, q as f32)
+    });
+    engine.register_fn("highpass", |s: Signal, cutoff: i64, q: i64| {
+        s.highpass(cutoff as f32, q as f32)
+    });
+
     // Tap constructors. The two-arg form picks a sensible default
     // decay so the tap sounds like a brief reflection; the three-arg
     // form is explicit. `decay_k = 0` opts back into the legacy

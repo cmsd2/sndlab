@@ -84,39 +84,46 @@ impl Signal {
     /// milliseconds of the output ramp up from zero; usually masked
     /// by the envelope you apply.
     pub fn bandpass(&self, center_hz: f32, q: f32) -> Signal {
-        let q = q.max(1e-3);
-        let center_hz = center_hz.max(1.0).min(SAMPLE_RATE_F * 0.49);
-        let w0 = std::f32::consts::TAU * center_hz / SAMPLE_RATE_F;
-        let alpha = w0.sin() / (2.0 * q);
-        let cos_w0 = w0.cos();
-
-        // Direct Form I biquad coefficients.
+        let (cos_w0, alpha) = biquad_w0_alpha(center_hz, q);
         let b0 = alpha;
+        let b1 = 0.0;
         let b2 = -alpha;
         let a0 = 1.0 + alpha;
         let a1 = -2.0 * cos_w0;
         let a2 = 1.0 - alpha;
-        let inv_a0 = 1.0 / a0;
-        let b0 = b0 * inv_a0;
-        let b2 = b2 * inv_a0;
-        let a1 = a1 * inv_a0;
-        let a2 = a2 * inv_a0;
+        Signal::new(apply_biquad(&self.samples, b0, b1, b2, a0, a1, a2))
+    }
 
-        let mut x1 = 0.0_f32;
-        let mut x2 = 0.0_f32;
-        let mut y1 = 0.0_f32;
-        let mut y2 = 0.0_f32;
-        let mut out = Vec::with_capacity(self.samples.len());
-        for &x0 in self.samples.iter() {
-            // b1 = 0 for the RBJ bandpass, so it drops out.
-            let y0 = b0 * x0 + b2 * x2 - a1 * y1 - a2 * y2;
-            x2 = x1;
-            x1 = x0;
-            y2 = y1;
-            y1 = y0;
-            out.push(y0);
-        }
-        Signal::new(out)
+    /// Biquad lowpass (RBJ Audio EQ Cookbook). Passes content below
+    /// `cutoff_hz`, attenuates above. `q` controls the resonance at
+    /// the cutoff knee — `0.707` is the standard Butterworth value
+    /// (no resonant peak). Higher Q (~2–10) creates an audible
+    /// emphasis right at the cutoff.
+    pub fn lowpass(&self, cutoff_hz: f32, q: f32) -> Signal {
+        let (cos_w0, alpha) = biquad_w0_alpha(cutoff_hz, q);
+        let one_minus_cos = 1.0 - cos_w0;
+        let b0 = one_minus_cos * 0.5;
+        let b1 = one_minus_cos;
+        let b2 = one_minus_cos * 0.5;
+        let a0 = 1.0 + alpha;
+        let a1 = -2.0 * cos_w0;
+        let a2 = 1.0 - alpha;
+        Signal::new(apply_biquad(&self.samples, b0, b1, b2, a0, a1, a2))
+    }
+
+    /// Biquad highpass (RBJ Audio EQ Cookbook). Mirror of `lowpass`:
+    /// passes content above `cutoff_hz`, attenuates below. Same `q`
+    /// intuition — 0.707 is Butterworth (flat), higher resonates.
+    pub fn highpass(&self, cutoff_hz: f32, q: f32) -> Signal {
+        let (cos_w0, alpha) = biquad_w0_alpha(cutoff_hz, q);
+        let one_plus_cos = 1.0 + cos_w0;
+        let b0 = one_plus_cos * 0.5;
+        let b1 = -one_plus_cos;
+        let b2 = one_plus_cos * 0.5;
+        let a0 = 1.0 + alpha;
+        let a1 = -2.0 * cos_w0;
+        let a2 = 1.0 - alpha;
+        Signal::new(apply_biquad(&self.samples, b0, b1, b2, a0, a1, a2))
     }
 
     /// Sum a slice of signals. All signals are zero-padded to the
@@ -206,6 +213,51 @@ impl Tap {
     /// Default reflection decay (1/e at ~80 ms). Used when the script
     /// calls the two-argument form of `tap`.
     pub const DEFAULT_DECAY_K: f32 = 12.0;
+}
+
+/// Compute the (cos w0, α) pair shared by all RBJ biquad shapes.
+/// Clamps freq to a safe sub-Nyquist range and Q to a positive value.
+fn biquad_w0_alpha(freq_hz: f32, q: f32) -> (f32, f32) {
+    let q = q.max(1e-3);
+    let freq = freq_hz.max(1.0).min(SAMPLE_RATE_F * 0.49);
+    let w0 = std::f32::consts::TAU * freq / SAMPLE_RATE_F;
+    let alpha = w0.sin() / (2.0 * q);
+    (w0.cos(), alpha)
+}
+
+/// Run a Direct-Form-I biquad with the given un-normalised
+/// coefficients across `samples`. The caller supplies a non-zero
+/// `a0`; this function normalises by it and runs the recurrence.
+fn apply_biquad(
+    samples: &[f32],
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a0: f32,
+    a1: f32,
+    a2: f32,
+) -> Vec<f32> {
+    let inv_a0 = 1.0 / a0;
+    let b0 = b0 * inv_a0;
+    let b1 = b1 * inv_a0;
+    let b2 = b2 * inv_a0;
+    let a1 = a1 * inv_a0;
+    let a2 = a2 * inv_a0;
+
+    let mut x1 = 0.0_f32;
+    let mut x2 = 0.0_f32;
+    let mut y1 = 0.0_f32;
+    let mut y2 = 0.0_f32;
+    let mut out = Vec::with_capacity(samples.len());
+    for &x0 in samples {
+        let y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+        x2 = x1;
+        x1 = x0;
+        y2 = y1;
+        y1 = y0;
+        out.push(y0);
+    }
+    out
 }
 
 /// Build a sine wave at `freq_hz`, lasting `duration_s` seconds, with
