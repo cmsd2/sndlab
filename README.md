@@ -82,6 +82,19 @@ the [DSL overview](./book/src/dsl/overview.md) status table and the
 corresponding chapter both get updated in the same commit, per the
 discipline in [CLAUDE.md](./CLAUDE.md).
 
+## Comparing against a reference
+
+The toolbar's **Load reference...** button opens an audio file
+(MP3 / WAV / Ogg / FLAC) via the OS file picker. The decoded waveform
+and FFT are overlaid on the scope in amber, with the patch's own
+waveform and FFT in green/blue on top. Both spectra share the same
+dB-reference floor so the comparison reflects relative loudness.
+
+The typical workflow: load a reference sample, eval the patch, tune
+the additive recipe until the patch's spectrum lines up with the
+reference's. "Clear" removes the reference and returns to the
+patch-only view.
+
 ## MCP integration
 
 While sndlab is running, register the MCP server with Claude Code:

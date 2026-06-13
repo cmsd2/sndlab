@@ -16,6 +16,10 @@ use sndlab_core::Buffer;
 const COLOR_BG: Color32 = Color32::from_rgb(10, 18, 14);
 const COLOR_WAVE: Color32 = Color32::from_rgb(140, 230, 180);
 const COLOR_SPEC: Color32 = Color32::from_rgb(180, 200, 240);
+// Amber for reference, distinct from the green patch wave and the
+// blue patch spectrum.
+const COLOR_REF_WAVE: Color32 = Color32::from_rgb(240, 180, 100);
+const COLOR_REF_SPEC: Color32 = Color32::from_rgb(240, 150, 80);
 const COLOR_AXIS: Color32 = Color32::from_rgb(40, 70, 55);
 const COLOR_LABEL: Color32 = Color32::from_rgb(120, 140, 130);
 
@@ -28,8 +32,15 @@ const SPECTRUM_MAX_HZ: f32 = 6_000.0;
 const SPECTRUM_FLOOR_DB: f32 = -80.0;
 
 /// Draw the split scope into `ui`. The waveform and spectrum each get
-/// half the vertical space.
-pub fn show(ui: &mut Ui, buffer: Option<&Buffer>, spectrum: Option<&[f32]>) {
+/// half the vertical space. Reference buffer/spectrum (if provided)
+/// are drawn on top of the patch in a contrasting amber colour.
+pub fn show(
+    ui: &mut Ui,
+    buffer: Option<&Buffer>,
+    spectrum: Option<&[f32]>,
+    reference: Option<&Buffer>,
+    reference_spectrum: Option<&[f32]>,
+) {
     let size = ui.available_size();
     let half_h = (size.y * 0.5).floor();
     let wave_size = Vec2::new(size.x, half_h);
@@ -38,11 +49,11 @@ pub fn show(ui: &mut Ui, buffer: Option<&Buffer>, spectrum: Option<&[f32]>) {
     let (wave_rect, _) = ui.allocate_exact_size(wave_size, Sense::hover());
     let (spec_rect, _) = ui.allocate_exact_size(spec_size, Sense::hover());
 
-    draw_waveform(ui, wave_rect, buffer);
-    draw_spectrum(ui, spec_rect, buffer, spectrum);
+    draw_waveform(ui, wave_rect, buffer, reference);
+    draw_spectrum(ui, spec_rect, buffer, spectrum, reference, reference_spectrum);
 }
 
-fn draw_waveform(ui: &Ui, rect: Rect, buffer: Option<&Buffer>) {
+fn draw_waveform(ui: &Ui, rect: Rect, buffer: Option<&Buffer>, reference: Option<&Buffer>) {
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, COLOR_BG);
 
@@ -55,21 +66,12 @@ fn draw_waveform(ui: &Ui, rect: Rect, buffer: Option<&Buffer>) {
         Stroke::new(1.0, COLOR_AXIS),
     );
 
-    let Some(buf) = buffer else {
+    // If neither buffer nor reference is present, prompt and return.
+    if buffer.is_none() && reference.is_none() {
         painter.text(
             rect.center(),
             Align2::CENTER_CENTER,
             "no buffer rendered yet — F5 to eval",
-            FontId::monospace(12.0),
-            COLOR_LABEL,
-        );
-        return;
-    };
-    if buf.samples.is_empty() {
-        painter.text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            "(empty buffer)",
             FontId::monospace(12.0),
             COLOR_LABEL,
         );
@@ -80,9 +82,56 @@ fn draw_waveform(ui: &Ui, rect: Rect, buffer: Option<&Buffer>) {
     if n_columns == 0 {
         return;
     }
-    let samples = buf.samples.as_ref();
     let amp_scale = rect.height() * 0.45;
 
+    // Reference drawn first so the patch's wave sits on top.
+    if let Some(buf) = reference.filter(|b| !b.samples.is_empty()) {
+        draw_peaks(&painter, rect, center_y, amp_scale, &buf.samples, COLOR_REF_WAVE);
+    }
+    if let Some(buf) = buffer.filter(|b| !b.samples.is_empty()) {
+        draw_peaks(&painter, rect, center_y, amp_scale, &buf.samples, COLOR_WAVE);
+    }
+
+    // Footer info — show the patch's info if present, else the
+    // reference's. If both are present they line up over the same
+    // time axis only if you treat each as its own time scale, so
+    // we list both lengths so the user can read the comparison.
+    let info = match (buffer, reference) {
+        (Some(p), Some(r)) => format!(
+            "patch {:.2}s · ref {:.2}s",
+            p.samples.len() as f32 / p.sample_rate as f32,
+            r.samples.len() as f32 / r.sample_rate as f32,
+        ),
+        (Some(b), None) | (None, Some(b)) => format!(
+            "{:.2} s · {} samples · {} Hz",
+            b.samples.len() as f32 / b.sample_rate as f32,
+            b.samples.len(),
+            b.sample_rate,
+        ),
+        (None, None) => String::new(),
+    };
+    if !info.is_empty() {
+        painter.text(
+            Pos2::new(rect.right() - 6.0, rect.bottom() - 6.0),
+            Align2::RIGHT_BOTTOM,
+            info,
+            FontId::monospace(11.0),
+            COLOR_LABEL,
+        );
+    }
+}
+
+/// Draw min/max peaks of a sample buffer across the rectangle.
+fn draw_peaks(
+    painter: &egui::Painter,
+    rect: Rect,
+    center_y: f32,
+    amp_scale: f32,
+    samples: &[f32],
+    colour: Color32,
+) {
+    let n_columns = rect.width() as usize;
+    let stroke = Stroke::new(1.0, colour);
     for i in 0..n_columns {
         let start = i * samples.len() / n_columns;
         let end = ((i + 1) * samples.len() / n_columns).max(start + 1);
@@ -96,39 +145,32 @@ fn draw_waveform(ui: &Ui, rect: Rect, buffer: Option<&Buffer>) {
         let x = rect.left() + i as f32 + 0.5;
         let y_lo = center_y - lo * amp_scale;
         let y_hi = center_y - hi * amp_scale;
-        painter.line_segment(
-            [Pos2::new(x, y_hi), Pos2::new(x, y_lo)],
-            Stroke::new(1.0, COLOR_WAVE),
-        );
+        painter.line_segment([Pos2::new(x, y_hi), Pos2::new(x, y_lo)], stroke);
     }
-
-    let info = format!(
-        "{:.2} s · {} samples · {} Hz",
-        buf.samples.len() as f32 / buf.sample_rate as f32,
-        buf.samples.len(),
-        buf.sample_rate,
-    );
-    painter.text(
-        Pos2::new(rect.right() - 6.0, rect.bottom() - 6.0),
-        Align2::RIGHT_BOTTOM,
-        info,
-        FontId::monospace(11.0),
-        COLOR_LABEL,
-    );
 }
 
-fn draw_spectrum(ui: &Ui, rect: Rect, buffer: Option<&Buffer>, spectrum: Option<&[f32]>) {
+fn draw_spectrum(
+    ui: &Ui,
+    rect: Rect,
+    buffer: Option<&Buffer>,
+    spectrum: Option<&[f32]>,
+    reference: Option<&Buffer>,
+    reference_spectrum: Option<&[f32]>,
+) {
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, COLOR_BG);
 
     // Top border so the eye reads two stacked panels even at small
     // sizes.
     painter.line_segment(
-        [Pos2::new(rect.left(), rect.top()), Pos2::new(rect.right(), rect.top())],
+        [
+            Pos2::new(rect.left(), rect.top()),
+            Pos2::new(rect.right(), rect.top()),
+        ],
         Stroke::new(1.0, COLOR_AXIS),
     );
 
-    let (Some(buf), Some(spec)) = (buffer, spectrum) else {
+    if spectrum.is_none() && reference_spectrum.is_none() {
         painter.text(
             rect.center(),
             Align2::CENTER_CENTER,
@@ -136,9 +178,6 @@ fn draw_spectrum(ui: &Ui, rect: Rect, buffer: Option<&Buffer>, spectrum: Option<
             FontId::monospace(12.0),
             COLOR_LABEL,
         );
-        return;
-    };
-    if spec.is_empty() || buf.samples.is_empty() {
         return;
     }
 
@@ -162,27 +201,72 @@ fn draw_spectrum(ui: &Ui, rect: Rect, buffer: Option<&Buffer>, spectrum: Option<
         }
     }
 
-    // Each bin of `spec` covers (sample_rate / 2) / spec.len() Hz.
-    // We render up to SPECTRUM_MAX_HZ.
+    // The 0-dB reference is the max magnitude across both spectra,
+    // so direct visual comparison reflects relative loudness.
+    let max_patch = bin_max_in_band(buffer, spectrum);
+    let max_ref = bin_max_in_band(reference, reference_spectrum);
+    let max_mag = max_patch.max(max_ref).max(1e-12);
+
+    // Reference first so the patch overlay sits on top.
+    if let (Some(buf), Some(spec)) = (reference, reference_spectrum) {
+        draw_spectrum_bars(&painter, rect, plot_h, buf, spec, max_mag, COLOR_REF_SPEC);
+    }
+    if let (Some(buf), Some(spec)) = (buffer, spectrum) {
+        draw_spectrum_bars(&painter, rect, plot_h, buf, spec, max_mag, COLOR_SPEC);
+    }
+
+    painter.text(
+        Pos2::new(rect.right() - 6.0, rect.top() + 4.0),
+        Align2::RIGHT_TOP,
+        format!(
+            "spectrum · 0 – {:.0} kHz · {:.0} dB floor",
+            SPECTRUM_MAX_HZ / 1000.0,
+            SPECTRUM_FLOOR_DB
+        ),
+        FontId::monospace(10.0),
+        COLOR_LABEL,
+    );
+}
+
+/// Maximum magnitude in the visible (0 → SPECTRUM_MAX_HZ) band of one
+/// spectrum, or 0.0 if either input is missing. Used to set the
+/// shared dB-reference floor.
+fn bin_max_in_band(buffer: Option<&Buffer>, spectrum: Option<&[f32]>) -> f32 {
+    let (Some(buf), Some(spec)) = (buffer, spectrum) else {
+        return 0.0;
+    };
+    if spec.is_empty() {
+        return 0.0;
+    }
+    let nyquist = buf.sample_rate as f32 * 0.5;
+    let bins_per_hz = spec.len() as f32 / nyquist;
+    let max_bin = (SPECTRUM_MAX_HZ * bins_per_hz).min(spec.len() as f32) as usize;
+    spec[..max_bin].iter().copied().fold(0.0_f32, f32::max)
+}
+
+fn draw_spectrum_bars(
+    painter: &egui::Painter,
+    rect: Rect,
+    plot_h: f32,
+    buf: &Buffer,
+    spec: &[f32],
+    max_mag: f32,
+    colour: Color32,
+) {
+    if spec.is_empty() {
+        return;
+    }
     let nyquist = buf.sample_rate as f32 * 0.5;
     let bins_per_hz = spec.len() as f32 / nyquist;
     let max_bin = (SPECTRUM_MAX_HZ * bins_per_hz).min(spec.len() as f32) as usize;
     if max_bin == 0 {
         return;
     }
-
     let n_columns = rect.width() as usize;
     if n_columns == 0 {
         return;
     }
-    // Max magnitude across the visible band — used as our 0 dB
-    // reference so the plot autoscales to whatever's loudest.
-    let max_mag = spec[..max_bin]
-        .iter()
-        .copied()
-        .fold(0.0_f32, f32::max)
-        .max(1e-12);
-
+    let stroke = Stroke::new(1.0, colour);
     for i in 0..n_columns {
         let start_bin = i * max_bin / n_columns;
         let end_bin = ((i + 1) * max_bin / n_columns).max(start_bin + 1);
@@ -200,19 +284,7 @@ fn draw_spectrum(ui: &Ui, rect: Rect, buffer: Option<&Buffer>, spectrum: Option<
         let x = rect.left() + i as f32 + 0.5;
         painter.line_segment(
             [Pos2::new(x, rect.bottom()), Pos2::new(x, rect.bottom() - h)],
-            Stroke::new(1.0, COLOR_SPEC),
+            stroke,
         );
     }
-
-    painter.text(
-        Pos2::new(rect.right() - 6.0, rect.top() + 4.0),
-        Align2::RIGHT_TOP,
-        format!(
-            "spectrum · 0 – {:.0} kHz · {:.0} dB floor",
-            SPECTRUM_MAX_HZ / 1000.0,
-            SPECTRUM_FLOOR_DB
-        ),
-        FontId::monospace(10.0),
-        COLOR_LABEL,
-    );
 }

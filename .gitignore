@@ -3,3 +3,11 @@
 *.swp
 *.swo
 .DS_Store
+
+# Reference audio samples used for sound design (referenced from the
+# repo's working dir but not committed — keeps the repo small and
+# avoids accidental publication of third-party recordings).
+*.mp3
+*.wav
+*.ogg
+*.flac

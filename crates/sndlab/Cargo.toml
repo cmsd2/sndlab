@@ -19,6 +19,8 @@ eframe.workspace = true
 egui.workspace = true
 egui_code_editor.workspace = true
 rustfft.workspace = true
+rfd.workspace = true
+symphonia.workspace = true
 
 rmcp.workspace = true
 tokio.workspace = true

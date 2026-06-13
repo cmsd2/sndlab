@@ -62,6 +62,19 @@ fn toolbar(ui: &mut egui::Ui, app: &mut SndlabApp) {
                 }
             }
         }
+        ui.separator();
+        if ui.small_button("Load reference...").clicked() {
+            app.pick_and_load_reference();
+        }
+        if let Some(name) = &app.reference_name {
+            ui.colored_label(
+                Color32::from_rgb(240, 180, 100),
+                format!("ref: {name}"),
+            );
+            if ui.small_button("clear").clicked() {
+                app.clear_reference();
+            }
+        }
     });
 }
 
@@ -114,6 +127,8 @@ fn scope_pane(ui: &mut egui::Ui, app: &SndlabApp) {
         ui,
         app.last_buffer.as_ref(),
         app.last_spectrum.as_deref(),
+        app.reference_buffer.as_ref(),
+        app.reference_spectrum.as_deref(),
     );
 }
 

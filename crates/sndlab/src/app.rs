@@ -26,6 +26,13 @@ pub struct SndlabApp {
     /// FFT magnitudes of `last_buffer`, computed when it changes.
     /// What the scope's lower pane shows.
     pub last_spectrum: Option<Vec<f32>>,
+    /// Optional reference audio file decoded from disk and overlaid
+    /// on the scope so designers can A/B their patch against a
+    /// recording. `None` until "Load reference..." is used.
+    pub reference_buffer: Option<Buffer>,
+    pub reference_spectrum: Option<Vec<f32>>,
+    /// Filename of the loaded reference, for the toolbar/status display.
+    pub reference_name: Option<String>,
     /// Endpoint string for the status bar.
     pub mcp_endpoint: String,
     pub filename: String,
@@ -93,6 +100,9 @@ impl SndlabApp {
             engine,
             last_buffer: None,
             last_spectrum: None,
+            reference_buffer: None,
+            reference_spectrum: None,
+            reference_name: None,
             mcp_endpoint: format!("http://127.0.0.1:{MCP_PORT}/mcp"),
             filename: "patches.rhai".into(),
             mailbox: Some(mailbox),
@@ -168,6 +178,45 @@ impl SndlabApp {
     fn set_last_buffer(&mut self, buf: Buffer) {
         self.last_spectrum = Some(spectrum::compute(&buf));
         self.last_buffer = Some(buf);
+    }
+
+    /// Open a file picker and load the chosen audio file as the
+    /// reference. Errors land in the log; success replaces any
+    /// previously-loaded reference. Runs the file dialog
+    /// synchronously, which briefly blocks the UI thread — fine
+    /// because it's user-initiated.
+    pub fn pick_and_load_reference(&mut self) {
+        let dialog = rfd::FileDialog::new()
+            .add_filter("audio", &["mp3", "wav", "ogg", "flac"])
+            .add_filter("any", &["*"])
+            .set_title("Load reference audio");
+        let Some(path) = dialog.pick_file() else {
+            return;
+        };
+        let display = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("(unnamed)")
+            .to_string();
+        match crate::reference::load(&path) {
+            Ok(buf) => {
+                self.reference_spectrum = Some(spectrum::compute(&buf));
+                self.reference_buffer = Some(buf);
+                self.reference_name = Some(display.clone());
+                self.log.info(format!("loaded reference: {display}"));
+            }
+            Err(e) => {
+                self.log.error(format!("reference load failed: {e}"));
+            }
+        }
+    }
+
+    pub fn clear_reference(&mut self) {
+        if self.reference_buffer.take().is_some() {
+            self.reference_spectrum = None;
+            self.reference_name = None;
+            self.log.info("reference cleared");
+        }
     }
 
     /// Compile the buffer through Rhai, then auto-play the first

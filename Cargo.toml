@@ -29,6 +29,15 @@ egui_code_editor = "0.3"
 # FFT for the scope's spectral view. Pure Rust, no native deps.
 rustfft = "6"
 
+# File dialog for "Load reference..." in the toolbar. Native picker
+# on each OS, pure Rust glue.
+rfd = "0.17"
+
+# Audio decoder used to load reference samples (MP3/WAV/Ogg/FLAC).
+# Already in the dep tree transitively via Kira; we depend on it
+# directly so symphonia's public API is in our crate.
+symphonia = { version = "0.5", features = ["mp3", "vorbis", "wav", "ogg", "flac"] }
+
 # Scripting
 rhai = { version = "1", features = ["sync"] }
 

@@ -8,6 +8,7 @@
 mod app;
 mod log;
 mod mcp;
+mod reference;
 mod scope;
 mod spectrum;
 mod ui;
