@@ -73,6 +73,7 @@ consumer; an embedded game audio engine is another (see
 | `chirp(start_hz, end_hz, dur_s)` | shipped | Linear-FM sine sweep |
 | `noise(kind, dur_s)` | shipped | Noise generator (white/pink/brown) |
 | `signal.env(attack_s, decay_s)` | shipped | Attack + exp decay envelope |
+| `signal.fade_out(duration_s)` | shipped | Cosine-squared tail fade |
 | `signal.gain(linear)` | shipped | Linear amplitude scaling |
 | `signal.bandpass(center_hz, q)` | shipped | Biquad resonant bandpass filter |
 | `signal.lowpass(cutoff_hz, q)` | shipped | Biquad lowpass (cuts above cutoff) |

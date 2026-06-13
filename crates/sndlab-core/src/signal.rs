@@ -111,6 +111,39 @@ impl Signal {
         Signal::new(apply_biquad(&self.samples, b0, b1, b2, a0, a1, a2))
     }
 
+    /// Smooth cosine-squared fade-out applied to the **last**
+    /// `duration_s` of the buffer. Composes naturally with `env` —
+    /// the envelope shapes the body, the fade catches whatever's
+    /// left at the end so the buffer terminates at silence
+    /// regardless of how loud the body still was. Use this when a
+    /// single exponential `env` would leave audible level at the
+    /// buffer boundary and produce a click on playback.
+    ///
+    /// The shape is `cos²(π·t/2)` over the fade region, smooth at
+    /// both ends — no derivative discontinuity where the fade starts
+    /// or where it reaches zero.
+    pub fn fade_out(&self, duration_s: f32) -> Signal {
+        let n = self.samples.len();
+        if n == 0 || duration_s <= 0.0 {
+            return self.clone();
+        }
+        let fade_samples = ((duration_s * SAMPLE_RATE_F) as usize).min(n).max(1);
+        let fade_start = n - fade_samples;
+        let inv_len = 1.0 / fade_samples as f32;
+        let mut out = Vec::with_capacity(n);
+        for (i, &s) in self.samples.iter().enumerate() {
+            let gain = if i < fade_start {
+                1.0
+            } else {
+                let t = (i - fade_start) as f32 * inv_len;
+                let c = (std::f32::consts::FRAC_PI_2 * t).cos();
+                c * c
+            };
+            out.push(s * gain);
+        }
+        Signal::new(out)
+    }
+
     /// Biquad highpass (RBJ Audio EQ Cookbook). Mirror of `lowpass`:
     /// passes content above `cutoff_hz`, attenuates below. Same `q`
     /// intuition — 0.707 is Butterworth (flat), higher resonates.

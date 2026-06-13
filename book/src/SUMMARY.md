@@ -23,6 +23,7 @@
 - [`chirp`](./dsl/chirp.md)
 - [`noise`](./dsl/noise.md)
 - [`env`](./dsl/env.md)
+- [`fade_out`](./dsl/fade_out.md)
 - [`gain`](./dsl/gain.md)
 - [`bandpass`](./dsl/bandpass.md)
 - [`lowpass`](./dsl/lowpass.md)

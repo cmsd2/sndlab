@@ -15,6 +15,7 @@ the engine renders it to a mono sample buffer.
 | [`chirp`](./chirp.md) | shipped | Linear-FM sine sweep — broadband source for reverb-style taps. |
 | [`noise`](./noise.md) | shipped | White / pink / brown noise. |
 | [`env`](./env.md) | shipped | Attack + exponential decay applied to a signal. |
+| [`fade_out`](./fade_out.md) | shipped | Cosine-squared fade over the buffer's last `duration_s`. |
 | [`gain`](./gain.md) | shipped | Linear amplitude scaling. |
 | [`bandpass`](./bandpass.md) | shipped | Biquad bandpass — carves resonant peaks from a broadband source. |
 | [`lowpass`](./lowpass.md) | shipped | Biquad lowpass — passes content below cutoff, attenuates above. |

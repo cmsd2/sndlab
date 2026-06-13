@@ -234,6 +234,14 @@ fn build_rhai_engine(state: Arc<Mutex<EvalState>>) -> rhai::Engine {
     engine.register_fn("gain", |s: Signal, factor: f64| s.gain(factor as f32));
     engine.register_fn("gain", |s: Signal, factor: i64| s.gain(factor as f32));
 
+    // Cosine-squared fade applied to the buffer's last `duration_s`.
+    engine.register_fn("fade_out", |s: Signal, duration_s: f64| {
+        s.fade_out(duration_s as f32)
+    });
+    engine.register_fn("fade_out", |s: Signal, duration_s: i64| {
+        s.fade_out(duration_s as f32)
+    });
+
     // Biquad bandpass — applies a resonant peak filter to the source.
     // Rhai needs every numeric type combination spelled out.
     engine.register_fn("bandpass", |s: Signal, center: f64, q: f64| {

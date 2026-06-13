@@ -268,6 +268,32 @@ mod tests {
             .count()
     }
 
+    /// fade_out leaves the body of the buffer unchanged and brings
+    /// the last region smoothly down to zero. The very last sample
+    /// must be at or below the noise floor of the cosine ramp.
+    #[test]
+    fn fade_out_smooths_the_tail() {
+        let mut engine = Engine::new().expect("engine init");
+        engine
+            .eval(
+                r#"
+                patch("p", "one_shot", sine(440.0, 1.0).fade_out(0.3));
+            "#,
+            )
+            .expect("eval ok");
+        let buf = engine.render("p").expect("render ok");
+        let n = buf.samples.len();
+        let body = window_rms(&buf.samples, 0, n.saturating_sub(15_000));
+        let tail = window_rms(&buf.samples, n - 2_400, n);
+        assert!(
+            body > 10.0 * tail,
+            "tail should be far quieter than the body: body={body}, tail={tail}"
+        );
+        // Final sample must be essentially silent.
+        let last = buf.samples.last().copied().unwrap_or(0.0).abs();
+        assert!(last < 0.01, "last sample should be ~0: {last}");
+    }
+
     /// A lowpass at 5 kHz passes a 1 kHz sine intact and attenuates a
     /// 10 kHz sine heavily. Inverse for highpass.
     #[test]
