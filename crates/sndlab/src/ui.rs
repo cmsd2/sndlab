@@ -1,7 +1,7 @@
 //! TUI rendering. Lays out three vertical zones — editor, status, log —
 //! and renders the App into them.
 
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
@@ -26,15 +26,33 @@ pub fn render(frame: &mut Frame, app: &App) {
 }
 
 fn render_editor(frame: &mut Frame, area: Rect, app: &App) {
-    // tui-textarea owns its own block; we set the title here to reflect
-    // the current filename and (later) modified state.
-    let mut editor = app.editor.clone();
-    editor.set_block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" {} ", app.filename)),
-    );
-    frame.render_widget(&editor, area);
+    // We render a syntect-highlighted Paragraph in place of
+    // tui-textarea's own widget. tui-textarea keeps its role as the
+    // *model* — it owns the buffer, cursor position, undo history,
+    // search state — but the *view* is ours. This buys per-token
+    // colour at the cost of soft-wrapping and selection rendering,
+    // both of which are explicit non-goals for now.
+    let buffer = app.editor.lines().join("\n");
+    let lines = app.highlighter.highlight(&buffer);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" {} ", app.filename));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    frame.render_widget(Paragraph::new(lines), inner);
+
+    // Place the terminal cursor at the editor model's cursor
+    // position, offset by the block's inner origin. The cursor never
+    // leaves the visible area because we don't scroll yet; long
+    // buffers extend off the bottom of the pane until task 9 wires
+    // a real scroll.
+    let (cy, cx) = app.editor.cursor();
+    let cursor_x = inner.x.saturating_add(cx as u16);
+    let cursor_y = inner.y.saturating_add(cy as u16);
+    if inner.contains(Position::new(cursor_x, cursor_y)) {
+        frame.set_cursor_position(Position::new(cursor_x, cursor_y));
+    }
 }
 
 fn render_status(frame: &mut Frame, area: Rect, app: &App) {

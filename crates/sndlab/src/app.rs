@@ -7,11 +7,13 @@ use sndlab_core::Engine;
 use tui_textarea::{Input, Key, TextArea};
 
 use crate::log::LogPane;
+use crate::syntax::Highlighter;
 
 pub struct App<'a> {
     pub editor: TextArea<'a>,
     pub log: LogPane,
     pub engine: Engine,
+    pub highlighter: Highlighter,
     pub should_quit: bool,
     /// MCP endpoint string for the status bar. Empty until the MCP
     /// server is wired up.
@@ -61,6 +63,7 @@ impl App<'_> {
             editor,
             log,
             engine,
+            highlighter: Highlighter::new(),
             should_quit: false,
             mcp_endpoint: String::new(),
             filename: "patches.rhai".into(),

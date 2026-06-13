@@ -2,6 +2,7 @@
 
 mod app;
 mod log;
+mod syntax;
 mod ui;
 
 use std::io;
