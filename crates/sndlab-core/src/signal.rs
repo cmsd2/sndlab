@@ -111,6 +111,33 @@ impl Signal {
         Signal::new(apply_biquad(&self.samples, b0, b1, b2, a0, a1, a2))
     }
 
+    /// Tremolo — amplitude modulation by a low-frequency sine. The
+    /// modulator runs `cos(2π·rate_hz·t)`, scaled so that `depth = 0`
+    /// is a no-op and `depth = 1` swings the amplitude between 0 and
+    /// the input's full level. Common musical values: `rate_hz` in
+    /// 3–8 Hz, `depth` in 0.3–0.7. Slower rates (< 1 Hz) feel like
+    /// volume swelling; faster (> 15 Hz) cross into rough AM
+    /// territory.
+    ///
+    /// Composes naturally with `env`: `signal.env(...).tremolo(...)`
+    /// gives an exponential decay with a wobble laid on top.
+    pub fn tremolo(&self, rate_hz: f32, depth: f32) -> Signal {
+        let depth = depth.clamp(0.0, 1.0);
+        let half_depth = depth * 0.5;
+        let base = 1.0 - half_depth;
+        let two_pi_rate = std::f32::consts::TAU * rate_hz;
+        let inv_sr = 1.0 / SAMPLE_RATE_F;
+        let mut out = Vec::with_capacity(self.samples.len());
+        for (i, &s) in self.samples.iter().enumerate() {
+            let t = i as f32 * inv_sr;
+            // cos starts at 1, so the modulator begins at full
+            // amplitude — no immediate dip at the signal's onset.
+            let lfo = base + half_depth * (two_pi_rate * t).cos();
+            out.push(s * lfo);
+        }
+        Signal::new(out)
+    }
+
     /// Smooth cosine-squared fade-out applied to the **last**
     /// `duration_s` of the buffer. Composes naturally with `env` —
     /// the envelope shapes the body, the fade catches whatever's

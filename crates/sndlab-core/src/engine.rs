@@ -242,6 +242,20 @@ fn build_rhai_engine(state: Arc<Mutex<EvalState>>) -> rhai::Engine {
         s.fade_out(duration_s as f32)
     });
 
+    // Tremolo: sine LFO modulating signal amplitude.
+    engine.register_fn("tremolo", |s: Signal, rate: f64, depth: f64| {
+        s.tremolo(rate as f32, depth as f32)
+    });
+    engine.register_fn("tremolo", |s: Signal, rate: i64, depth: f64| {
+        s.tremolo(rate as f32, depth as f32)
+    });
+    engine.register_fn("tremolo", |s: Signal, rate: f64, depth: i64| {
+        s.tremolo(rate as f32, depth as f32)
+    });
+    engine.register_fn("tremolo", |s: Signal, rate: i64, depth: i64| {
+        s.tremolo(rate as f32, depth as f32)
+    });
+
     // Biquad bandpass — applies a resonant peak filter to the source.
     // Rhai needs every numeric type combination spelled out.
     engine.register_fn("bandpass", |s: Signal, center: f64, q: f64| {

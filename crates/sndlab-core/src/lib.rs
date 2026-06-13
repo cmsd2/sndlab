@@ -268,6 +268,31 @@ mod tests {
             .count()
     }
 
+    /// Tremolo with depth 1.0 at 4 Hz wobbles a steady sine between
+    /// near-zero (modulator trough) and near-peak (modulator peak),
+    /// with the trough roughly an eighth-period from the onset.
+    #[test]
+    fn tremolo_swings_amplitude() {
+        let mut engine = Engine::new().expect("engine init");
+        engine
+            .eval(
+                r#"
+                patch("p", "one_shot", sine(440.0, 1.0).tremolo(4.0, 1.0));
+            "#,
+            )
+            .expect("eval ok");
+        let buf = engine.render("p").expect("render ok");
+        // At t=0 the LFO is at 1.0 (cos(0) = 1); the first 30 ms is
+        // the loudest part. At t=0.125 s (half-period of 4 Hz) the
+        // LFO is at 0.0 — the signal there is essentially silent.
+        let peak = window_rms(&buf.samples, 0, 1_440);
+        let trough = window_rms(&buf.samples, 5_520, 6_960);
+        assert!(
+            peak > 10.0 * trough,
+            "tremolo should swing amplitude: peak={peak}, trough={trough}"
+        );
+    }
+
     /// fade_out leaves the body of the buffer unchanged and brings
     /// the last region smoothly down to zero. The very last sample
     /// must be at or below the noise floor of the cosine ramp.
