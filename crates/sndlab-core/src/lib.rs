@@ -268,6 +268,32 @@ mod tests {
             .count()
     }
 
+    /// A bandpass at the source's centre frequency passes the signal
+    /// (after a brief biquad transient); the same filter applied to a
+    /// sine well outside the passband attenuates dramatically.
+    #[test]
+    fn bandpass_passes_centre_attenuates_far() {
+        let mut engine = Engine::new().expect("engine init");
+        engine
+            .eval(
+                r#"
+                patch("pass", "one_shot", sine(1000.0, 1.0).bandpass(1000.0, 10.0));
+                patch("stop", "one_shot", sine(5000.0, 1.0).bandpass(1000.0, 10.0));
+            "#,
+            )
+            .expect("eval ok");
+        let pass = engine.render("pass").expect("render ok");
+        let stop = engine.render("stop").expect("render ok");
+        // Skip the first 100 ms to avoid the biquad's transient ramp.
+        let skip = 4_800;
+        let pass_rms = window_rms(&pass.samples, skip, pass.samples.len());
+        let stop_rms = window_rms(&stop.samples, skip, stop.samples.len());
+        assert!(
+            pass_rms > 20.0 * stop_rms,
+            "Q=10 at 1 kHz should kill 5 kHz: pass_rms={pass_rms}, stop_rms={stop_rms}"
+        );
+    }
+
     /// Mixing two short signals produces a buffer the length of the
     /// longer input and contains contributions from both.
     #[test]

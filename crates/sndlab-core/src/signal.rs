@@ -75,6 +75,50 @@ impl Signal {
         Signal::new(out)
     }
 
+    /// Constant-skirt-gain biquad bandpass (RBJ Audio EQ Cookbook).
+    /// Carves a resonant peak at `center_hz` from the source. `q`
+    /// controls the peak's width: bandwidth ≈ `center_hz / q`. Useful
+    /// values run roughly 0.5 (very broad) to 50 (very narrow).
+    ///
+    /// The transient response of the biquad means the first few
+    /// milliseconds of the output ramp up from zero; usually masked
+    /// by the envelope you apply.
+    pub fn bandpass(&self, center_hz: f32, q: f32) -> Signal {
+        let q = q.max(1e-3);
+        let center_hz = center_hz.max(1.0).min(SAMPLE_RATE_F * 0.49);
+        let w0 = std::f32::consts::TAU * center_hz / SAMPLE_RATE_F;
+        let alpha = w0.sin() / (2.0 * q);
+        let cos_w0 = w0.cos();
+
+        // Direct Form I biquad coefficients.
+        let b0 = alpha;
+        let b2 = -alpha;
+        let a0 = 1.0 + alpha;
+        let a1 = -2.0 * cos_w0;
+        let a2 = 1.0 - alpha;
+        let inv_a0 = 1.0 / a0;
+        let b0 = b0 * inv_a0;
+        let b2 = b2 * inv_a0;
+        let a1 = a1 * inv_a0;
+        let a2 = a2 * inv_a0;
+
+        let mut x1 = 0.0_f32;
+        let mut x2 = 0.0_f32;
+        let mut y1 = 0.0_f32;
+        let mut y2 = 0.0_f32;
+        let mut out = Vec::with_capacity(self.samples.len());
+        for &x0 in self.samples.iter() {
+            // b1 = 0 for the RBJ bandpass, so it drops out.
+            let y0 = b0 * x0 + b2 * x2 - a1 * y1 - a2 * y2;
+            x2 = x1;
+            x1 = x0;
+            y2 = y1;
+            y1 = y0;
+            out.push(y0);
+        }
+        Signal::new(out)
+    }
+
     /// Sum a slice of signals. All signals are zero-padded to the
     /// longest's length; the output length is `max(len(s) for s in signals)`.
     pub fn mix(signals: &[Signal]) -> Signal {

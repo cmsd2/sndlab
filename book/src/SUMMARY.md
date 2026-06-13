@@ -24,6 +24,7 @@
 - [`noise`](./dsl/noise.md)
 - [`env`](./dsl/env.md)
 - [`gain`](./dsl/gain.md)
+- [`bandpass`](./dsl/bandpass.md)
 - [`mix`](./dsl/mix.md)
 - [`tap`](./dsl/tap.md)
 

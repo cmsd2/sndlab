@@ -74,6 +74,7 @@ consumer; an embedded game audio engine is another (see
 | `noise(kind, dur_s)` | shipped | Noise generator (white/pink/brown) |
 | `signal.env(attack_s, decay_s)` | shipped | Attack + exp decay envelope |
 | `signal.gain(linear)` | shipped | Linear amplitude scaling |
+| `signal.bandpass(center_hz, q)` | shipped | Biquad resonant bandpass filter |
 | `mix([sig, ...])` | shipped | Sum signals |
 | `tap(delay_s, gain[, decay_k])` + `signal.with_taps([...])` | shipped | Discrete reflection-style reverb (per-tap decay) |
 

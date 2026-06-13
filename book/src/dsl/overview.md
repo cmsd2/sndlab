@@ -16,6 +16,7 @@ the engine renders it to a mono sample buffer.
 | [`noise`](./noise.md) | shipped | White / pink / brown noise. |
 | [`env`](./env.md) | shipped | Attack + exponential decay applied to a signal. |
 | [`gain`](./gain.md) | shipped | Linear amplitude scaling. |
+| [`bandpass`](./bandpass.md) | shipped | Biquad bandpass — carves resonant peaks from a broadband source. |
 | [`mix`](./mix.md) | shipped | Sum multiple signals. |
 | [`tap`](./tap.md) | shipped | A delay tap, used by `with_taps`. |
 | `with_taps` | shipped | Apply a list of reverb taps to a signal. |

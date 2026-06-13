@@ -234,6 +234,21 @@ fn build_rhai_engine(state: Arc<Mutex<EvalState>>) -> rhai::Engine {
     engine.register_fn("gain", |s: Signal, factor: f64| s.gain(factor as f32));
     engine.register_fn("gain", |s: Signal, factor: i64| s.gain(factor as f32));
 
+    // Biquad bandpass — applies a resonant peak filter to the source.
+    // Rhai needs every numeric type combination spelled out.
+    engine.register_fn("bandpass", |s: Signal, center: f64, q: f64| {
+        s.bandpass(center as f32, q as f32)
+    });
+    engine.register_fn("bandpass", |s: Signal, center: i64, q: f64| {
+        s.bandpass(center as f32, q as f32)
+    });
+    engine.register_fn("bandpass", |s: Signal, center: f64, q: i64| {
+        s.bandpass(center as f32, q as f32)
+    });
+    engine.register_fn("bandpass", |s: Signal, center: i64, q: i64| {
+        s.bandpass(center as f32, q as f32)
+    });
+
     // Tap constructors. The two-arg form picks a sensible default
     // decay so the tap sounds like a brief reflection; the three-arg
     // form is explicit. `decay_k = 0` opts back into the legacy
