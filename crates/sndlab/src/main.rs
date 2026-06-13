@@ -7,6 +7,7 @@
 
 mod app;
 mod log;
+mod mcp;
 mod scope;
 mod ui;
 
@@ -38,6 +39,14 @@ fn main() -> anyhow::Result<()> {
 
 impl eframe::App for SndlabApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Drain MCP commands and republish state before drawing so
+        // any AI edits that arrived this frame land in the editor
+        // pane the user is about to see.
+        self.pump_mailbox();
         ui::draw(ui, self);
+        // Keep the loop ticking even without user input so MCP-
+        // triggered edits/plays don't sit invisible until the user
+        // moves the mouse. 30 fps is plenty for our needs.
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
     }
 }

@@ -58,14 +58,7 @@ fn toolbar(ui: &mut egui::Ui, app: &mut SndlabApp) {
                     .small_button(format!("{} ({:.1}s)", name, dur))
                     .clicked()
                 {
-                    if let Ok(buf) = app.engine.render(&name) {
-                        app.last_buffer = Some(buf);
-                    }
-                    if let Err(e) = app.engine.play(&name) {
-                        app.log.error(format!("play failed: {e}"));
-                    } else {
-                        app.log.audio(format!("playing '{}'", name));
-                    }
+                    app.play_by_name(&name);
                 }
             }
         }

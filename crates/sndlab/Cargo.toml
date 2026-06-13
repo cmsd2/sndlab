@@ -21,6 +21,8 @@ egui_code_editor.workspace = true
 
 rmcp.workspace = true
 tokio.workspace = true
+axum.workspace = true
+schemars.workspace = true
 
 serde.workspace = true
 ron.workspace = true

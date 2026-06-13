@@ -15,9 +15,10 @@ the same script that designs the sound plays it in the final game.
 ## Status
 
 Early development. The DSL engine compiles, the GUI renders, the
-scope works, and patches play through Kira. Project model, mix model,
-and MCP server are landing in order — see `book/src/SUMMARY.md` for
-the roadmap of chapters and the corresponding implementation tasks.
+scope works, patches play through Kira, and the MCP server is up so
+an AI agent can edit the buffer in lockstep with you. Project model
+and mix model are next — see `book/src/SUMMARY.md` for the roadmap
+of chapters and the corresponding implementation tasks.
 
 ## Quick start
 
@@ -80,6 +81,20 @@ the [DSL overview](./book/src/dsl/overview.md) status table and the
 corresponding chapter both get updated in the same commit, per the
 discipline in [CLAUDE.md](./CLAUDE.md).
 
+## MCP integration
+
+While sndlab is running, register the MCP server with Claude Code:
+
+```sh
+claude mcp add sndlab http://127.0.0.1:7777/mcp
+```
+
+The agent can then read the editor buffer, propose edits, re-evaluate,
+play patches by name, and read the last error. The user sees every
+edit land in the editor pane in real time. See [the MCP
+chapter](./book/src/getting-started/mcp.md) for the full tool list
+and the typical iteration loop.
+
 ## Documentation
 
 Local build:
@@ -93,6 +108,22 @@ Then browse <http://localhost:3000>. Online build target lives on
 GitHub Pages (configuration coming with task 12).
 
 The book is the authoritative DSL reference; this README is a tour.
+
+## Troubleshooting
+
+### A faint click at the start of each playback
+
+If you're listening through laptop speakers, you may hear a brief click
+at the start of each patch. This is almost always your laptop's built-in
+audio amplifier coming out of a low-power state — many laptop speaker
+amps have automatic gain control that ducks during silence and clicks
+when "real" signal arrives. The signal coming out of sndlab is smooth;
+the click is added by the hardware.
+
+Test by plugging in headphones or external speakers. If the click
+disappears, it's your laptop amp's AGC. If it persists, the OS audio
+backend may be doing the same thing — try disabling any "audio
+enhancement" / "smart sound" features in your system settings.
 
 ## License
 

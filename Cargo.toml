@@ -34,8 +34,17 @@ kira = "0.12"
 fundsp = "0.23"
 
 # MCP server
-rmcp = { version = "1", features = ["server", "transport-streamable-http-server"] }
+rmcp = { version = "1", features = [
+    "server",
+    "macros",
+    "schemars",
+    "transport-streamable-http-server",
+] }
 tokio = { version = "1", features = ["full"] }
+# axum is what rmcp's streamable HTTP server transport plugs into for
+# the actual HTTP plumbing. Version matched to rmcp's expectation.
+axum = "0.8"
+schemars = "1"
 
 # Serialisation (project manifests)
 serde = { version = "1", features = ["derive"] }
