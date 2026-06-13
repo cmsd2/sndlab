@@ -7,7 +7,7 @@
 use egui::{Color32, RichText};
 use egui_code_editor::CodeEditor;
 
-use crate::app::SndlabApp;
+use crate::app::{Modal, PendingAction, SndlabApp};
 use crate::log::LogKind;
 use crate::scope;
 
@@ -29,6 +29,9 @@ pub fn draw(ui: &mut egui::Ui, app: &mut SndlabApp) {
         .default_size(360.0)
         .show_inside(ui, |ui| scope_pane(ui, app));
     egui::CentralPanel::default().show_inside(ui, |ui| editor(ui, app));
+
+    // Modal — rendered last so it draws on top of the panels.
+    render_modal(ui.ctx(), app);
 }
 
 fn toolbar(ui: &mut egui::Ui, app: &mut SndlabApp) {
@@ -42,8 +45,11 @@ fn toolbar(ui: &mut egui::Ui, app: &mut SndlabApp) {
             app.eval_and_play();
         }
         ui.separator();
+        if ui.small_button("New").clicked() {
+            app.new_project();
+        }
         if ui.small_button("Open...").clicked() {
-            app.pick_and_open_project();
+            app.open_project();
         }
         if ui.small_button("Save").clicked() {
             app.save_project();
@@ -147,10 +153,146 @@ fn scope_pane(ui: &mut egui::Ui, app: &SndlabApp) {
     );
 }
 
+fn render_modal(ctx: &egui::Context, app: &mut SndlabApp) {
+    let Some(modal) = app.modal.clone() else {
+        return;
+    };
+    // Track a pending close so we can swap modal state cleanly
+    // outside the closures.
+    let mut close_modal = false;
+    let mut new_modal_state: Option<Modal> = None;
+
+    match modal {
+        Modal::ConfirmDiscard { action } => {
+            egui::Window::new("Unsaved changes")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "The current project has unsaved changes. {} anyway?",
+                        match action {
+                            PendingAction::NewProject => "Discard and start a new project",
+                            PendingAction::OpenProject => "Discard and open a different project",
+                        }
+                    ));
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(RichText::new("Discard").color(Color32::LIGHT_RED))
+                            .clicked()
+                        {
+                            close_modal = true;
+                            app.discard_and(action);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close_modal = true;
+                        }
+                    });
+                });
+        }
+        Modal::EditFilename { index, mut input } => {
+            let title = if index.is_some() {
+                "Rename script"
+            } else {
+                "Add script"
+            };
+            egui::Window::new(title)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Filename (e.g. ambience.rhai):");
+                    let resp = ui.text_edit_singleline(&mut input);
+                    // Keep the input live in the modal state so the
+                    // user sees what they're typing.
+                    new_modal_state = Some(Modal::EditFilename {
+                        index,
+                        input: input.clone(),
+                    });
+                    let submit = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    ui.horizontal(|ui| {
+                        if ui.button("OK").clicked() || submit {
+                            close_modal = true;
+                            match index {
+                                Some(i) => app.rename_script(i, input.clone()),
+                                None => app.add_script(input.clone()),
+                            }
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close_modal = true;
+                        }
+                    });
+                });
+        }
+        Modal::ConfirmDelete { index } => {
+            let name = app
+                .project
+                .scripts
+                .get(index)
+                .map(|s| s.relative_path.clone())
+                .unwrap_or_default();
+            egui::Window::new("Delete script")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "Delete {name} from the project? This also removes the file from disk."
+                    ));
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(RichText::new("Delete").color(Color32::LIGHT_RED))
+                            .clicked()
+                        {
+                            close_modal = true;
+                            app.delete_script(index);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close_modal = true;
+                        }
+                    });
+                });
+        }
+    }
+
+    if close_modal {
+        app.modal = None;
+    } else if let Some(new) = new_modal_state {
+        // Persist the user's in-progress typing.
+        app.modal = Some(new);
+    }
+}
+
+/// Generate a filename like `untitled.rhai` or `untitled-2.rhai`
+/// that doesn't collide with an existing script.
+fn default_new_filename(app: &SndlabApp) -> String {
+    let exists = |name: &str| {
+        app.project
+            .scripts
+            .iter()
+            .any(|s| s.relative_path == name)
+    };
+    if !exists("untitled.rhai") {
+        return "untitled.rhai".into();
+    }
+    for n in 2..1000 {
+        let candidate = format!("untitled-{n}.rhai");
+        if !exists(&candidate) {
+            return candidate;
+        }
+    }
+    "untitled-many.rhai".into()
+}
+
 fn editor(ui: &mut egui::Ui, app: &mut SndlabApp) {
-    // Tabs across the top: one per script, click to switch active.
+    // Tabs across the top: one per script. Click to switch active.
+    // Right-click for Rename / Delete. A "+" tab at the end creates
+    // a new script.
     ui.horizontal_wrapped(|ui| {
         let scripts_len = app.project.scripts.len();
+        let mut new_active: Option<usize> = None;
+        let mut rename_request: Option<(usize, String)> = None;
+        let mut delete_request: Option<usize> = None;
         for i in 0..scripts_len {
             let is_active = i == app.project.active;
             let script = &app.project.scripts[i];
@@ -159,9 +301,38 @@ fn editor(ui: &mut egui::Ui, app: &mut SndlabApp) {
             } else {
                 script.relative_path.clone()
             };
-            if ui.selectable_label(is_active, label).clicked() {
-                app.project.active = i;
+            let resp = ui.selectable_label(is_active, label);
+            if resp.clicked() {
+                new_active = Some(i);
             }
+            resp.context_menu(|ui| {
+                if ui.button("Rename...").clicked() {
+                    rename_request = Some((i, app.project.scripts[i].relative_path.clone()));
+                    ui.close();
+                }
+                if ui.button("Delete").clicked() {
+                    delete_request = Some(i);
+                    ui.close();
+                }
+            });
+        }
+        if ui.small_button("+").on_hover_text("Add script").clicked() {
+            app.modal = Some(Modal::EditFilename {
+                index: None,
+                input: default_new_filename(app),
+            });
+        }
+        if let Some(i) = new_active {
+            app.project.active = i;
+        }
+        if let Some((i, current)) = rename_request {
+            app.modal = Some(Modal::EditFilename {
+                index: Some(i),
+                input: current,
+            });
+        }
+        if let Some(i) = delete_request {
+            app.modal = Some(Modal::ConfirmDelete { index: i });
         }
     });
     ui.separator();

@@ -41,6 +41,35 @@ pub struct SndlabApp {
     /// Shared state with the MCP server thread. `None` if the MCP
     /// server failed to start; the app then runs single-user.
     pub mailbox: Option<Arc<Mutex<Mailbox>>>,
+    /// Active confirmation / input modal, if any.
+    pub modal: Option<Modal>,
+}
+
+/// A blocking confirmation or input dialog rendered on top of the
+/// normal UI. The user dismisses it with a button before the rest
+/// of the toolbar / editor accepts input.
+#[derive(Debug, Clone)]
+pub enum Modal {
+    /// Asking the user to confirm discarding unsaved changes for an
+    /// action that replaces the project.
+    ConfirmDiscard { action: PendingAction },
+    /// Editing a script's filename. `index` is the script being
+    /// renamed (or `None` for a brand-new script).
+    EditFilename {
+        index: Option<usize>,
+        input: String,
+    },
+    /// Confirm deleting a script.
+    ConfirmDelete { index: usize },
+}
+
+/// What to perform after a `ConfirmDiscard` modal is accepted.
+#[derive(Debug, Clone, Copy)]
+pub enum PendingAction {
+    /// Create a fresh in-memory untitled project.
+    NewProject,
+    /// Open a project from a directory the user picks.
+    OpenProject,
 }
 
 const SEED_PATCH: &str = r#"// Press F5 to evaluate and play the first patch.
@@ -109,6 +138,84 @@ impl SndlabApp {
             reference_name: None,
             mcp_endpoint: format!("http://127.0.0.1:{MCP_PORT}/mcp"),
             mailbox: Some(mailbox),
+            modal: None,
+        }
+    }
+
+    /// Create a fresh in-memory untitled project. If the current
+    /// project has unsaved changes, prompt first via a confirmation
+    /// modal; otherwise act immediately.
+    pub fn new_project(&mut self) {
+        if self.project.is_dirty() {
+            self.modal = Some(Modal::ConfirmDiscard {
+                action: PendingAction::NewProject,
+            });
+            return;
+        }
+        self.replace_with_fresh_project();
+    }
+
+    /// Same dirty-check pattern as `new_project`, but routes to the
+    /// directory-picker on confirm.
+    pub fn open_project(&mut self) {
+        if self.project.is_dirty() {
+            self.modal = Some(Modal::ConfirmDiscard {
+                action: PendingAction::OpenProject,
+            });
+            return;
+        }
+        self.pick_and_open_project();
+    }
+
+    fn replace_with_fresh_project(&mut self) {
+        self.project = crate::project::Project::unsaved("untitled", SEED_PATCH.to_string());
+        self.log.info("started a fresh untitled project");
+    }
+
+    /// Called by the UI's ConfirmDiscard modal once the user has
+    /// agreed to drop unsaved changes. Routes to the right action.
+    pub fn discard_and(&mut self, action: PendingAction) {
+        match action {
+            PendingAction::NewProject => self.replace_with_fresh_project(),
+            PendingAction::OpenProject => self.pick_and_open_project(),
+        }
+    }
+
+    /// Add a new script to the current project. The caller is
+    /// responsible for prompting for the filename; this just runs
+    /// the model-side operation and reports to the log.
+    pub fn add_script(&mut self, filename: String) {
+        match self.project.add_script(filename) {
+            Ok(idx) => {
+                self.project.active = idx;
+                self.log.info(format!(
+                    "added script {}",
+                    self.project.scripts[idx].relative_path
+                ));
+            }
+            Err(e) => self.log.error(format!("add script failed: {e}")),
+        }
+    }
+
+    pub fn rename_script(&mut self, index: usize, new_filename: String) {
+        match self.project.rename_script(index, new_filename.clone()) {
+            Ok(()) => self.log.info(format!(
+                "renamed script #{index} to {new_filename}"
+            )),
+            Err(e) => self.log.error(format!("rename failed: {e}")),
+        }
+    }
+
+    pub fn delete_script(&mut self, index: usize) {
+        let name = self
+            .project
+            .scripts
+            .get(index)
+            .map(|s| s.relative_path.clone())
+            .unwrap_or_default();
+        match self.project.delete_script(index) {
+            Ok(()) => self.log.info(format!("deleted script {name}")),
+            Err(e) => self.log.error(format!("delete failed: {e}")),
         }
     }
 

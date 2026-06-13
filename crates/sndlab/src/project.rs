@@ -66,6 +66,7 @@ pub enum ProjectError {
     Ron(String),
     EmptyManifest,
     MissingScript(String),
+    InvalidFilename(String),
 }
 
 impl std::fmt::Display for ProjectError {
@@ -75,6 +76,7 @@ impl std::fmt::Display for ProjectError {
             Self::Ron(s) => write!(f, "ron: {s}"),
             Self::EmptyManifest => write!(f, "no scripts in project manifest"),
             Self::MissingScript(s) => write!(f, "script '{s}' not found relative to project"),
+            Self::InvalidFilename(s) => write!(f, "invalid filename: {s}"),
         }
     }
 }
@@ -268,5 +270,125 @@ impl Project {
             s.buffer = content;
             s.dirty = true;
         }
+    }
+
+    /// Add a new (empty) script to the project. Validates the
+    /// filename and refuses collisions. Updates the manifest. Returns
+    /// the new script's index — the caller usually wants to make it
+    /// the active tab.
+    pub fn add_script(&mut self, filename: String) -> Result<usize, ProjectError> {
+        let filename = filename.trim().to_string();
+        if filename.is_empty() {
+            return Err(ProjectError::InvalidFilename(
+                "filename is empty".into(),
+            ));
+        }
+        if filename.contains('/') || filename.contains('\\') {
+            return Err(ProjectError::InvalidFilename(
+                "no path separators allowed".into(),
+            ));
+        }
+        if self
+            .scripts
+            .iter()
+            .any(|s| s.relative_path == filename)
+        {
+            return Err(ProjectError::InvalidFilename(format!(
+                "'{filename}' already exists in the project"
+            )));
+        }
+        self.manifest.scripts.push(filename.clone());
+        self.scripts.push(Script {
+            relative_path: filename,
+            buffer: "// new script — define patches with patch(name, role, signal)\n"
+                .to_string(),
+            dirty: true,
+        });
+        Ok(self.scripts.len() - 1)
+    }
+
+    /// Rename a script's file. If the project has a root on disk and
+    /// the file already exists there, the rename is performed on disk
+    /// too. Updates the manifest's script list and the in-memory
+    /// script's relative path.
+    pub fn rename_script(
+        &mut self,
+        index: usize,
+        new_filename: String,
+    ) -> Result<(), ProjectError> {
+        let new_filename = new_filename.trim().to_string();
+        if new_filename.is_empty() {
+            return Err(ProjectError::InvalidFilename(
+                "filename is empty".into(),
+            ));
+        }
+        if new_filename.contains('/') || new_filename.contains('\\') {
+            return Err(ProjectError::InvalidFilename(
+                "no path separators allowed".into(),
+            ));
+        }
+        if index >= self.scripts.len() {
+            return Err(ProjectError::InvalidFilename(format!(
+                "no script at index {index}"
+            )));
+        }
+        if self
+            .scripts
+            .iter()
+            .enumerate()
+            .any(|(i, s)| i != index && s.relative_path == new_filename)
+        {
+            return Err(ProjectError::InvalidFilename(format!(
+                "'{new_filename}' already exists in the project"
+            )));
+        }
+        let old_filename = self.scripts[index].relative_path.clone();
+        if let Some(root) = &self.root {
+            let old_path = root.join(&old_filename);
+            let new_path = root.join(&new_filename);
+            if old_path.is_file() {
+                fs::rename(&old_path, &new_path)?;
+            }
+        }
+        self.scripts[index].relative_path = new_filename.clone();
+        self.manifest.scripts[index] = new_filename;
+        // Don't mark dirty — the rename is already persisted on disk
+        // and the manifest will be rewritten on the next save anyway.
+        Ok(())
+    }
+
+    /// Remove a script from the project. Deletes the file from disk
+    /// (if the project has a root and the file exists). Updates the
+    /// manifest and adjusts the active index if necessary.
+    /// Refuses to delete the last remaining script — a project
+    /// without scripts has no editor to render into.
+    pub fn delete_script(&mut self, index: usize) -> Result<(), ProjectError> {
+        if self.scripts.len() <= 1 {
+            return Err(ProjectError::InvalidFilename(
+                "can't delete the last script in a project".into(),
+            ));
+        }
+        if index >= self.scripts.len() {
+            return Err(ProjectError::InvalidFilename(format!(
+                "no script at index {index}"
+            )));
+        }
+        let filename = self.scripts[index].relative_path.clone();
+        if let Some(root) = &self.root {
+            let path = root.join(&filename);
+            if path.is_file() {
+                fs::remove_file(&path)?;
+            }
+        }
+        self.scripts.remove(index);
+        self.manifest.scripts.remove(index);
+        // Keep active in bounds; prefer staying at the same visual
+        // position when possible.
+        if self.active >= self.scripts.len() {
+            self.active = self.scripts.len() - 1;
+        } else if self.active > index {
+            self.active -= 1;
+        }
+        Ok(())
     }
 }
