@@ -1,5 +1,7 @@
 # sndlab
 
+[![docs](https://github.com/cmsd2/sndlab/actions/workflows/book.yml/badge.svg)](https://cmsd2.github.io/sndlab/)
+
 A TUI sound-design environment for designing procedural audio in Rust.
 Edit Rhai patches in a terminal editor, hear them play through Kira,
 and expose the buffer over MCP so an AI agent (e.g. Claude Code) can
