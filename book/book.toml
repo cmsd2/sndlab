@@ -3,7 +3,6 @@ title = "sndlab"
 description = "A TUI sound-design environment with live Rhai scripting, Kira playback, and AI collaboration over MCP."
 authors = ["Chris Dawes"]
 language = "en"
-multilingual = false
 src = "src"
 
 [output.html]
