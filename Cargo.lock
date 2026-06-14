@@ -3588,6 +3588,7 @@ dependencies = [
  "rand 0.8.6",
  "rand_pcg",
  "rhai",
+ "symphonia",
  "thiserror 2.0.18",
  "tracing",
 ]

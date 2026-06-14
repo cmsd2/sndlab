@@ -104,6 +104,42 @@ pub enum StreamDef {
         source: Box<StreamDef>,
         taps: Vec<crate::signal::Tap>,
     },
+    /// Stochastic grain generator: brief damped sines fire at a Poisson
+    /// rate, each at a random frequency in `[freq_lo_hz, freq_hi_hz]`,
+    /// each decaying at `decay_k` per second. Useful for bubble streams,
+    /// rain, debris — anything that is many small discrete events at
+    /// random times rather than a continuous tone.
+    Grains {
+        rate_hz: f32,
+        freq_lo_hz: f32,
+        freq_hi_hz: f32,
+        decay_k: f32,
+        seed_a: u64,
+        seed_b: u64,
+    },
+    /// A decoded audio sample (MP3/WAV/Ogg/FLAC) played at the engine
+    /// sample rate. Linear-interpolated resampling when the source's
+    /// native rate differs from 48 kHz. `looping` controls whether
+    /// playback restarts at end-of-buffer (ambient-friendly) or
+    /// terminates (one-shot-friendly).
+    ///
+    /// Two independent rate controls:
+    /// - `playback_rate` is a tape-speed multiplier — 0.5 plays half-
+    ///   speed (octave down, double duration); 2.0 plays double-speed
+    ///   (octave up, half duration). Set by `.pitch(...)`. Identity = 1.0.
+    /// - `time_stretch` is a pitch-preserving stretch multiplier — 0.5
+    ///   plays half-speed at the *same pitch* (using granular
+    ///   reconstruction); 2.0 plays twice as fast at the same pitch.
+    ///   Set by `.speed(...)`. Identity = 1.0.
+    /// They compose: `.pitch(2.0).speed(0.5)` = octave up, original
+    /// duration.
+    Sample {
+        samples: std::sync::Arc<[f32]>,
+        source_sr: u32,
+        looping: bool,
+        playback_rate: f32,
+        time_stretch: f32,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -172,6 +208,34 @@ impl StreamDef {
                 source.instantiate(),
                 taps.clone(),
             )),
+            Self::Grains {
+                rate_hz,
+                freq_lo_hz,
+                freq_hi_hz,
+                decay_k,
+                seed_a,
+                seed_b,
+            } => Box::new(GrainsRunner::new(
+                *rate_hz,
+                *freq_lo_hz,
+                *freq_hi_hz,
+                *decay_k,
+                *seed_a,
+                *seed_b,
+            )),
+            Self::Sample {
+                samples,
+                source_sr,
+                looping,
+                playback_rate,
+                time_stretch,
+            } => Box::new(SampleRunner::new(
+                samples.clone(),
+                *source_sr,
+                *looping,
+                *playback_rate,
+                *time_stretch,
+            )),
         }
     }
 
@@ -200,7 +264,29 @@ impl StreamDef {
                     None => Some(d),
                 },
             ),
-            Self::Sine { .. } | Self::Noise { .. } => None,
+            Self::Sample {
+                samples,
+                source_sr,
+                looping,
+                playback_rate,
+                time_stretch,
+            } => {
+                if *looping {
+                    None
+                } else {
+                    // Duration scales inversely with BOTH rate factors:
+                    // base_duration / (pitch_rate × time_stretch).
+                    // .pitch(0.5) doubles duration; .speed(0.5) also
+                    // doubles duration; both at 0.5 quadruples it.
+                    let pitch_rate = playback_rate.max(1e-4);
+                    let stretch = time_stretch.max(1e-4);
+                    Some(
+                        samples.len() as f32
+                            / ((*source_sr as f32).max(1.0) * pitch_rate * stretch),
+                    )
+                }
+            }
+            Self::Sine { .. } | Self::Noise { .. } | Self::Grains { .. } => None,
         }
     }
 }
@@ -698,6 +784,293 @@ impl Stream for WithTapsRunner {
         }
         let _ = self.inv_sr;
         Some(out)
+    }
+}
+
+/// Single in-flight grain — phase, frequency, current envelope amplitude.
+#[derive(Clone, Copy)]
+struct Grain {
+    phase: f32,
+    phase_inc: f32,
+    amp: f32,
+}
+
+/// Stochastic grain runner. At each sample we toss a coin weighted by
+/// `rate_per_sample` to fire a new grain; each grain is a damped sine
+/// at a uniformly-sampled random frequency. Grains are culled when
+/// their amplitude falls below the audibility floor, keeping the
+/// active set bounded by the rate × mean grain lifetime.
+struct GrainsRunner {
+    rate_per_sample: f32,
+    freq_lo_hz: f32,
+    freq_hi_hz: f32,
+    per_sample_decay: f32,
+    rng: Pcg64,
+    grains: Vec<Grain>,
+}
+
+impl GrainsRunner {
+    const AMP_FLOOR: f32 = 1e-4;
+    const MAX_LIVE_GRAINS: usize = 256;
+
+    fn new(
+        rate_hz: f32,
+        freq_lo_hz: f32,
+        freq_hi_hz: f32,
+        decay_k: f32,
+        seed_a: u64,
+        seed_b: u64,
+    ) -> Self {
+        let rate = rate_hz.max(0.0);
+        let decay = decay_k.max(1e-3);
+        // Order the frequency bounds so users can pass them either way.
+        let (lo, hi) = if freq_lo_hz <= freq_hi_hz {
+            (freq_lo_hz, freq_hi_hz)
+        } else {
+            (freq_hi_hz, freq_lo_hz)
+        };
+        Self {
+            rate_per_sample: rate * DT,
+            freq_lo_hz: lo.max(1.0),
+            freq_hi_hz: hi.max(lo.max(1.0)),
+            per_sample_decay: (-decay * DT).exp(),
+            rng: Pcg64::new(seed_a as u128, seed_b as u128),
+            grains: Vec::new(),
+        }
+    }
+}
+
+impl Stream for GrainsRunner {
+    fn tick(&mut self) -> Option<f32> {
+        // Poisson-process approximation: at each sample, fire a new
+        // grain with probability `rate × dt`. Good enough below ~kHz
+        // rates; above that the per-sample model under-counts because
+        // it caps at one grain per sample.
+        if self.grains.len() < Self::MAX_LIVE_GRAINS
+            && self.rng.gen_range(0.0_f32..1.0_f32) < self.rate_per_sample
+        {
+            let freq = if self.freq_hi_hz > self.freq_lo_hz {
+                self.rng
+                    .gen_range(self.freq_lo_hz..self.freq_hi_hz)
+            } else {
+                self.freq_lo_hz
+            };
+            self.grains.push(Grain {
+                phase: 0.0,
+                phase_inc: TWO_PI * freq * DT,
+                amp: 1.0,
+            });
+        }
+
+        let mut sum = 0.0;
+        for g in &mut self.grains {
+            sum += g.phase.sin() * g.amp;
+            g.phase += g.phase_inc;
+            if g.phase >= TWO_PI {
+                g.phase -= TWO_PI;
+            }
+            g.amp *= self.per_sample_decay;
+        }
+        self.grains.retain(|g| g.amp > Self::AMP_FLOOR);
+
+        Some(sum)
+    }
+}
+
+/// Plays a decoded sample buffer with independent pitch and time-
+/// stretch controls.
+///
+/// Two paths:
+/// - **Simple linear-interp** when `time_stretch ≈ 1.0`. Pitch /
+///   sample-rate conversion only. Bit-perfect for the no-pitch case,
+///   no granular artefacts.
+/// - **Granular OLA** when `time_stretch ≠ 1.0`. 4 overlapping Hann-
+///   windowed grains at 75% overlap, hopping at `grain_len / 4`. The
+///   grain origin advances through the source at the time-stretched
+///   rate; within each grain, the read step uses only the pitch
+///   factor — so changing speed doesn't change pitch and vice versa.
+///   Tiny modulation artefacts on tonal content, but bubbles / noise /
+///   textures hide them well.
+struct SampleRunner {
+    samples: Arc<[f32]>,
+    looping: bool,
+    finished: bool,
+
+    /// Source samples consumed per output sample for a same-rate copy,
+    /// already multiplied by `pitch`. The granular grain-internal read
+    /// step uses this directly; the simple path uses it as well.
+    src_step_pitched: f64,
+
+    /// True when we need granular time-stretch (time_stretch != 1.0).
+    granular: bool,
+
+    // Simple path state.
+    simple_pos: f64,
+
+    // Granular path state.
+    out_sample_idx: u64,
+    grain_len_samples: u64,
+    grain_hop_samples: u64,
+    /// In source samples, how far the next grain's origin sits past
+    /// the previous one's. = (hop_out × src_per_out) / time_stretch.
+    grain_origin_advance_src: f64,
+    next_grain_origin_src: f64,
+    grains: Vec<SampleGrain>,
+}
+
+#[derive(Clone, Copy)]
+struct SampleGrain {
+    start_out: u64,
+    origin_src: f64,
+}
+
+impl SampleRunner {
+    /// Grain length in output samples — 60 ms at 48 kHz.
+    const GRAIN_LEN_MS: f64 = 60.0;
+    /// Overlap factor: 4 grains active at any time → hop = len/4, 75%
+    /// overlap. With Hann windows at this hop, OLA reconstruction sums
+    /// to ~2.0 → divide by 2 to normalise.
+    const OVERLAP_FACTOR: u64 = 4;
+    const OLA_NORM: f32 = 2.0;
+
+    fn new(
+        samples: Arc<[f32]>,
+        source_sr: u32,
+        looping: bool,
+        playback_rate: f32,
+        time_stretch: f32,
+    ) -> Self {
+        let source_sr = source_sr.max(1) as f64;
+        let pitch = playback_rate.max(1e-4) as f64;
+        let stretch = time_stretch.max(1e-4) as f64;
+
+        // Source samples per output sample for an unstretched read,
+        // pitched. Slower pitch → smaller step → lower frequency.
+        let src_per_out = source_sr / SAMPLE_RATE as f64;
+        let src_step_pitched = src_per_out * pitch;
+
+        let granular = (stretch - 1.0).abs() > 1e-6;
+
+        let grain_len_samples =
+            (Self::GRAIN_LEN_MS * 1e-3 * SAMPLE_RATE as f64) as u64;
+        let grain_hop_samples = (grain_len_samples / Self::OVERLAP_FACTOR).max(1);
+        // Each new grain's origin moves forward by hop_out output samples
+        // worth of source time, divided by the stretch factor. Slower
+        // stretch (0.5) → origins move more slowly → playback elongates.
+        let grain_origin_advance_src = (grain_hop_samples as f64) * src_per_out / stretch;
+
+        Self {
+            samples,
+            looping,
+            finished: false,
+            src_step_pitched,
+            granular,
+            simple_pos: 0.0,
+            out_sample_idx: 0,
+            grain_len_samples,
+            grain_hop_samples,
+            grain_origin_advance_src,
+            next_grain_origin_src: 0.0,
+            grains: Vec::with_capacity(Self::OVERLAP_FACTOR as usize + 1),
+        }
+    }
+
+    fn read_interp(&self, pos: f64) -> f32 {
+        let len = self.samples.len();
+        let i = pos.floor() as usize;
+        let frac = (pos - pos.floor()) as f32;
+        let a = self.samples[i.min(len - 1)];
+        let b = self.samples[(i + 1).min(len - 1)];
+        a + (b - a) * frac
+    }
+}
+
+impl Stream for SampleRunner {
+    fn tick(&mut self) -> Option<f32> {
+        if self.finished || self.samples.is_empty() {
+            return None;
+        }
+        if self.granular {
+            self.tick_granular()
+        } else {
+            self.tick_simple()
+        }
+    }
+}
+
+impl SampleRunner {
+    fn tick_simple(&mut self) -> Option<f32> {
+        let len = self.samples.len();
+        let s = self.read_interp(self.simple_pos);
+        self.simple_pos += self.src_step_pitched;
+        if self.simple_pos >= len as f64 {
+            if self.looping {
+                self.simple_pos %= len as f64;
+            } else {
+                self.finished = true;
+            }
+        }
+        Some(s)
+    }
+
+    fn tick_granular(&mut self) -> Option<f32> {
+        let len = self.samples.len();
+        let len_f = len as f64;
+
+        // Spawn at hop intervals.
+        if self.out_sample_idx % self.grain_hop_samples == 0 {
+            let in_range = self.looping || self.next_grain_origin_src < len_f;
+            if in_range {
+                let origin = if self.looping {
+                    self.next_grain_origin_src.rem_euclid(len_f)
+                } else {
+                    self.next_grain_origin_src
+                };
+                self.grains.push(SampleGrain {
+                    start_out: self.out_sample_idx,
+                    origin_src: origin,
+                });
+            }
+            self.next_grain_origin_src += self.grain_origin_advance_src;
+        }
+
+        let mut sum = 0.0_f32;
+        for g in &self.grains {
+            let local_t = self.out_sample_idx - g.start_out;
+            if local_t >= self.grain_len_samples {
+                continue;
+            }
+            let read_pos_raw = g.origin_src + (local_t as f64) * self.src_step_pitched;
+            let read_pos = if self.looping {
+                read_pos_raw.rem_euclid(len_f)
+            } else if read_pos_raw < 0.0 || read_pos_raw >= (len - 1) as f64 {
+                continue;
+            } else {
+                read_pos_raw
+            };
+            let s = self.read_interp(read_pos);
+            // Hann window across grain lifetime.
+            let phase = local_t as f32 / self.grain_len_samples.max(1) as f32;
+            let win = 0.5 - 0.5 * (TWO_PI * phase).cos();
+            sum += s * win;
+        }
+
+        // Cull expired grains.
+        let now = self.out_sample_idx;
+        let lifetime = self.grain_len_samples;
+        self.grains.retain(|g| now - g.start_out < lifetime);
+
+        // Non-looping end condition: no more grains will ever spawn AND
+        // every active one has expired.
+        if !self.looping
+            && self.next_grain_origin_src >= len_f
+            && self.grains.is_empty()
+        {
+            self.finished = true;
+        }
+
+        self.out_sample_idx += 1;
+        Some(sum / Self::OLA_NORM)
     }
 }
 

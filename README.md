@@ -84,6 +84,9 @@ consumer; an embedded game audio engine is another (see
 | `signal.highpass(cutoff_hz, q)` | shipped | Biquad highpass (cuts below cutoff) |
 | `mix([sig, ...])` | shipped | Sum signals |
 | `tap(delay_s, gain[, decay_k])` + `signal.with_taps([...])` | shipped | Discrete delay-tap reverb |
+| `grains(rate_hz, lo_hz, hi_hz[, decay_k])` | shipped | Stochastic damped-sine grain generator (bubbles, drips, rain) |
+| `sample(path)` / `sample_loop(path)` | shipped | Load MP3/WAV/Ogg/FLAC file as a Signal; runs through filter chain |
+| `signal.pitch(factor)` (samples only) | shipped | Tape-speed control: 0.5 = octave down + double length, 2.0 = octave up + half |
 
 `Status` flips to `shipped` as primitives land. Whenever a row flips,
 the [DSL overview](./book/src/dsl/overview.md) status table and the

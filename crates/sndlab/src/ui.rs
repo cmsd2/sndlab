@@ -21,6 +21,8 @@ pub fn draw(ui: &mut egui::Ui, app: &mut SndlabApp) {
     }
 
     egui::Panel::top("toolbar").show_inside(ui, |ui| toolbar(ui, app));
+    egui::Panel::top("patches_toolbar")
+        .show_inside(ui, |ui| patches_toolbar(ui, app));
     egui::Panel::bottom("status").show_inside(ui, |ui| status(ui, app));
     egui::Panel::bottom("log")
         .resizable(true)
@@ -60,24 +62,36 @@ fn toolbar(ui: &mut egui::Ui, app: &mut SndlabApp) {
             app.save_project_as();
         }
         ui.separator();
-        // Patch picker: lets the user trigger any registered patch by
-        // name, not just the first one. Hidden until at least one
-        // patch is registered so the toolbar isn't empty at startup.
-        let patches: Vec<_> = app
-            .engine
-            .patches()
-            .iter()
-            .map(|p| (p.name.clone(), p.duration_s))
-            .collect();
-        // Split patches by role so the controls match what each
-        // does: ambient = toggle on/off (lit when looping), one-shot
-        // = trigger + arm.
-        let patches: Vec<(String, PatchRole, f32)> = app
-            .engine
-            .patches()
-            .iter()
-            .map(|p| (p.name.clone(), p.role, p.duration_s))
-            .collect();
+        if ui.small_button("Load reference...").clicked() {
+            app.pick_and_load_reference();
+        }
+        if let Some(name) = &app.reference_name {
+            ui.colored_label(
+                Color32::from_rgb(240, 180, 100),
+                format!("ref: {name}"),
+            );
+            if ui.small_button("clear").clicked() {
+                app.clear_reference();
+            }
+        }
+    });
+}
+
+/// Second toolbar row containing per-patch trigger controls and the
+/// scene-fire button. Wraps onto multiple lines when the patch list
+/// outgrows the window — the main toolbar (file actions etc.) stays
+/// on one line above. Hidden when no patches have been registered.
+fn patches_toolbar(ui: &mut egui::Ui, app: &mut SndlabApp) {
+    let patches: Vec<(String, PatchRole, f32)> = app
+        .engine
+        .patches()
+        .iter()
+        .map(|p| (p.name.clone(), p.role, p.duration_s))
+        .collect();
+    if patches.is_empty() {
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
         let mut ambient_present = false;
         let mut one_shot_present = false;
         for (name, role, dur) in &patches {
@@ -133,19 +147,6 @@ fn toolbar(ui: &mut egui::Ui, app: &mut SndlabApp) {
                 .clicked()
             {
                 app.fire_scene();
-            }
-        }
-        ui.separator();
-        if ui.small_button("Load reference...").clicked() {
-            app.pick_and_load_reference();
-        }
-        if let Some(name) = &app.reference_name {
-            ui.colored_label(
-                Color32::from_rgb(240, 180, 100),
-                format!("ref: {name}"),
-            );
-            if ui.small_button("clear").clicked() {
-                app.clear_reference();
             }
         }
     });

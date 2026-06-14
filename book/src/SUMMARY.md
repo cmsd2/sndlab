@@ -31,6 +31,8 @@
 - [`highpass`](./dsl/highpass.md)
 - [`mix`](./dsl/mix.md)
 - [`tap`](./dsl/tap.md)
+- [`grains`](./dsl/grains.md)
+- [`sample`](./dsl/sample.md)
 
 # Projects
 

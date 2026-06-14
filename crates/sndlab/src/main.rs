@@ -24,6 +24,24 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    // Optional positional argument: a project.ron file (or the
+    // directory containing one) to open at startup. Print loudly to
+    // stderr so a misplaced `--` separator doesn't silently swallow
+    // the path — the most common reason this fails is a user typing
+    // `cargo run -p sndlab --release my-project` (no `--`), which
+    // makes cargo consume the path before the binary ever sees it.
+    let initial_project: Option<std::path::PathBuf> =
+        std::env::args().nth(1).map(std::path::PathBuf::from);
+    match initial_project.as_ref() {
+        Some(p) => eprintln!("sndlab: opening project at {}", p.display()),
+        None => eprintln!(
+            "sndlab: no project arg — starting with an untitled project. \
+             Pass a path to project.ron (or its directory) to auto-open. \
+             With cargo, use the `--` separator: \
+             `cargo run -p sndlab --release -- path/to/project.ron`"
+        ),
+    }
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
@@ -35,7 +53,13 @@ fn main() -> anyhow::Result<()> {
     eframe::run_native(
         "sndlab",
         options,
-        Box::new(|_cc| Ok(Box::new(SndlabApp::new()))),
+        Box::new(move |_cc| {
+            let mut app = SndlabApp::new();
+            if let Some(path) = initial_project {
+                app.open_project_at_path(&path);
+            }
+            Ok(Box::new(app))
+        }),
     )
     .map_err(|e| anyhow::anyhow!("eframe error: {e}"))
 }

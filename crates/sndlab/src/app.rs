@@ -176,7 +176,10 @@ impl SndlabApp {
             m.current_buffer = project.active_buffer().to_string();
         }
         log.info(format!("MCP server at http://127.0.0.1:{MCP_PORT}/mcp"));
-        log.info("starting with an unsaved project — Open... or Save As... to persist");
+        // No "starting with an unsaved project" message here — the
+        // status bar already shows the active project's name + path,
+        // and a misleading line above an `open_project_at_path` call
+        // from main was a confusing combination.
 
         Self {
             project,
@@ -291,6 +294,15 @@ impl SndlabApp {
     fn replace_with_fresh_project(&mut self) {
         self.project = crate::project::Project::unsaved("untitled", SEED_PATCH.to_string());
         self.log.info("started a fresh untitled project");
+        self.sync_project_root_to_engine();
+    }
+
+    /// Push the active project's root directory to the engine so
+    /// relative paths in `sample("…")` resolve correctly. Called after
+    /// every project mutation that can change the root.
+    fn sync_project_root_to_engine(&mut self) {
+        self.engine
+            .set_project_root(self.project.root.clone());
     }
 
     /// Called by the UI's ConfirmDiscard modal once the user has
@@ -343,11 +355,101 @@ impl SndlabApp {
     /// Open a project from a directory picker. Looks for a
     /// `project.ron` first; falls back to "every `.rhai` in the
     /// directory" if no manifest exists. Errors land in the log.
+    /// Open a project from an explicit filesystem path. Accepts either
+    /// a directory containing `project.ron` or the `project.ron` file
+    /// itself, in absolute or relative form. Used by the
+    /// `sndlab <path>` CLI entry point so a user can launch sndlab
+    /// pointing directly at a project. Failures are logged, not fatal
+    /// — the app continues with the untitled project.
+    pub fn open_project_at_path(&mut self, path: &std::path::Path) {
+        // Resolve relative paths against the process CWD up front, so
+        // a relative arg works regardless of the actual cwd at the
+        // point of evaluation. Falls back to the raw path if cwd is
+        // unavailable.
+        let absolute: std::path::PathBuf = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            match std::env::current_dir() {
+                Ok(cwd) => cwd.join(path),
+                Err(_) => path.to_path_buf(),
+            }
+        };
+        // Strip "./" / ".." and confirm the file/dir actually exists.
+        // canonicalize() resolves symlinks and returns an absolute
+        // path; on failure we get a more specific OS error than the
+        // generic "path does not exist".
+        let canonical = match std::fs::canonicalize(&absolute) {
+            Ok(p) => p,
+            Err(e) => {
+                let cwd = std::env::current_dir()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "(unknown)".to_string());
+                let msg = format!(
+                    "open project failed: {} (resolved to {}, cwd was {})",
+                    e,
+                    absolute.display(),
+                    cwd
+                );
+                self.log.error(msg.clone());
+                eprintln!("sndlab: {msg}");
+                return;
+            }
+        };
+        let dir: std::path::PathBuf = if canonical.is_file() {
+            canonical
+                .parent()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+        } else {
+            canonical
+        };
+        let manifest_present = dir.join("project.ron").is_file();
+        let result = if manifest_present {
+            Project::open(&dir)
+        } else {
+            Project::open_directory(&dir)
+        };
+        match result {
+            Ok(project) => {
+                let name = project.manifest.name.clone();
+                let n = project.scripts.len();
+                self.project = project;
+                self.log.info(format!(
+                    "opened project '{name}' ({n} script{})",
+                    if n == 1 { "" } else { "s" }
+                ));
+                eprintln!(
+                    "sndlab: opened project '{name}' ({n} script{}) from {}",
+                    if n == 1 { "" } else { "s" },
+                    dir.display()
+                );
+                self.sync_project_root_to_engine();
+                // Republish the new active buffer so an MCP client that
+                // attached during startup sees the project's content,
+                // not the seed script.
+                if let Some(mailbox) = self.mailbox.as_ref() {
+                    if let Ok(mut m) = mailbox.lock() {
+                        m.current_buffer = self.project.active_buffer().to_string();
+                    }
+                }
+            }
+            Err(e) => {
+                let msg = format!(
+                    "open project failed: {e} (dir: {})",
+                    dir.display()
+                );
+                self.log.error(msg.clone());
+                eprintln!("sndlab: {msg}");
+            }
+        }
+    }
+
     pub fn pick_and_open_project(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .set_title("Open project directory")
-            .pick_folder()
-        else {
+        let mut dialog = rfd::FileDialog::new().set_title("Open project directory");
+        if let Ok(cwd) = std::env::current_dir() {
+            dialog = dialog.set_directory(cwd);
+        }
+        let Some(path) = dialog.pick_folder() else {
             return;
         };
         let manifest_present = path.join("project.ron").is_file();
@@ -365,6 +467,7 @@ impl SndlabApp {
                     "opened project '{name}' ({n} script{})",
                     if n == 1 { "" } else { "s" }
                 ));
+                self.sync_project_root_to_engine();
             }
             Err(e) => {
                 self.log.error(format!("open project failed: {e}"));
@@ -395,16 +498,18 @@ impl SndlabApp {
     /// Pick a destination directory and save the project there. Sets
     /// the project's root so subsequent saves go to the same place.
     pub fn save_project_as(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .set_title("Save project as")
-            .pick_folder()
-        else {
+        let mut dialog = rfd::FileDialog::new().set_title("Save project as");
+        if let Ok(cwd) = std::env::current_dir() {
+            dialog = dialog.set_directory(cwd);
+        }
+        let Some(path) = dialog.pick_folder() else {
             return;
         };
         match self.project.save_to(&path) {
-            Ok(()) => self
-                .log
-                .info(format!("saved {}", path.display())),
+            Ok(()) => {
+                self.log.info(format!("saved {}", path.display()));
+                self.sync_project_root_to_engine();
+            }
             Err(e) => self.log.error(format!("save failed: {e}")),
         }
     }
@@ -498,10 +603,20 @@ impl SndlabApp {
     /// synchronously, which briefly blocks the UI thread — fine
     /// because it's user-initiated.
     pub fn pick_and_load_reference(&mut self) {
-        let dialog = rfd::FileDialog::new()
+        let mut dialog = rfd::FileDialog::new()
             .add_filter("audio", &["mp3", "wav", "ogg", "flac"])
             .add_filter("any", &["*"])
             .set_title("Load reference audio");
+        // Prefer the project root, falling back to CWD; both are far
+        // more likely to contain the sample the user wants than $HOME.
+        let start_dir = self
+            .project
+            .root
+            .clone()
+            .or_else(|| std::env::current_dir().ok());
+        if let Some(d) = start_dir {
+            dialog = dialog.set_directory(d);
+        }
         let Some(path) = dialog.pick_file() else {
             return;
         };

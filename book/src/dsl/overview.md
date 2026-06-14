@@ -40,6 +40,8 @@ context differs.
 | [`highpass`](./highpass.md) | shipped | Biquad highpass. |
 | [`mix`](./mix.md) | shipped | Sum multiple signals. |
 | [`tap`](./tap.md) | shipped | A delay tap, used by `with_taps`. (Per-tap exponential decay is honoured in one-shots only; ambient streams use fixed-gain delay copies.) |
+| [`grains`](./grains.md) | shipped | Stochastic damped-sine grain generator — bubbles, drips, rain. |
+| [`sample`](./sample.md) | shipped | Load an audio file (MP3/WAV/Ogg/FLAC) as a Signal. `sample(path)` plays once; `sample_loop(path)` wraps. |
 
 ## Conventions
 

@@ -69,6 +69,11 @@ pub struct Engine {
     /// Cleared on every `eval` so stale handles from re-defined
     /// patches don't outlive their source.
     ambient_handles: HashMap<String, AmbientHandle>,
+    /// Directory that relative `sample("…")` paths resolve against.
+    /// The host (project model) sets this whenever the active project
+    /// changes. Shared by Arc so the Rhai callback can read the
+    /// up-to-date value at eval time without a fresh engine rebuild.
+    project_root: Arc<Mutex<Option<std::path::PathBuf>>>,
 }
 
 /// One live ambient instance. Buffer-based handles control a
@@ -101,7 +106,8 @@ impl AmbientHandle {
 impl Engine {
     pub fn new() -> Result<Self> {
         let state: Arc<Mutex<EvalState>> = Arc::new(Mutex::new(EvalState::default()));
-        let rhai = build_rhai_engine(state.clone());
+        let project_root = Arc::new(Mutex::new(None));
+        let rhai = build_rhai_engine(state.clone(), project_root.clone());
         let audio = open_audio_manager();
         Ok(Self {
             rhai,
@@ -111,7 +117,16 @@ impl Engine {
             patches_order: Vec::new(),
             patches_info: Vec::new(),
             ambient_handles: HashMap::new(),
+            project_root,
         })
+    }
+
+    /// Set the directory relative paths in `sample("…")` resolve
+    /// against. Pass `None` to require absolute paths. Takes effect on
+    /// the next `eval`.
+    pub fn set_project_root(&mut self, root: Option<std::path::PathBuf>) {
+        let mut g = self.project_root.lock().expect("project root poisoned");
+        *g = root;
     }
 
     /// Whether the audio backend is alive. If `false`, `play` is a
@@ -451,10 +466,14 @@ fn open_audio_manager() -> Option<AudioManager<DefaultBackend>> {
 /// Construct the Rhai engine and register the DSL surface. The
 /// `state` `Arc` is captured by the `patch(...)` callback so that
 /// patch registrations can be collected into the shared `EvalState`.
-fn build_rhai_engine(state: Arc<Mutex<EvalState>>) -> rhai::Engine {
+fn build_rhai_engine(
+    state: Arc<Mutex<EvalState>>,
+    project_root: Arc<Mutex<Option<std::path::PathBuf>>>,
+) -> rhai::Engine {
     let mut engine = rhai::Engine::new();
 
     register_unified_dsl(&mut engine);
+    register_sample_dsl(&mut engine, project_root);
 
     // patch() takes a StreamDef. For one-shot patches the engine
     // renders the stream into a finite buffer at eval time; for
@@ -603,6 +622,57 @@ fn register_unified_dsl(engine: &mut rhai::Engine) {
         },
     );
 
+    // grains(rate_hz, freq_lo_hz, freq_hi_hz)              → default decay
+    // grains(rate_hz, freq_lo_hz, freq_hi_hz, decay_k)     → explicit decay
+    fn grains_def(rate: f32, lo: f32, hi: f32, decay_k: f32) -> StreamDef {
+        // Static seeds, varied by frequency range so two grains() calls
+        // in the same script don't share state when their parameters
+        // happen to match. Deterministic across runs of the same patch.
+        let mix = ((lo.to_bits() as u64) << 32) ^ (hi.to_bits() as u64);
+        StreamDef::Grains {
+            rate_hz: rate,
+            freq_lo_hz: lo,
+            freq_hi_hz: hi,
+            decay_k,
+            seed_a: 0xa2cf_7c2f_06a3_42e1 ^ mix,
+            seed_b: 0xd1e1_3f6e_92ab_55c3 ^ rate.to_bits() as u64,
+        }
+    }
+    const GRAINS_DEFAULT_DECAY_K: f32 = 80.0; // ~12 ms 1/e — bubble-ish
+    macro_rules! reg_grains_3 {
+        ($t1:ty, $t2:ty, $t3:ty) => {
+            engine.register_fn(
+                "grains",
+                move |r: $t1, lo: $t2, hi: $t3| {
+                    grains_def(r as f32, lo as f32, hi as f32, GRAINS_DEFAULT_DECAY_K)
+                },
+            );
+        };
+    }
+    macro_rules! reg_grains_4 {
+        ($t1:ty, $t2:ty, $t3:ty, $t4:ty) => {
+            engine.register_fn(
+                "grains",
+                move |r: $t1, lo: $t2, hi: $t3, k: $t4| {
+                    grains_def(r as f32, lo as f32, hi as f32, k as f32)
+                },
+            );
+        };
+    }
+    reg_grains_3!(f64, f64, f64);
+    reg_grains_3!(i64, f64, f64);
+    reg_grains_3!(f64, i64, f64);
+    reg_grains_3!(f64, f64, i64);
+    reg_grains_3!(i64, i64, f64);
+    reg_grains_3!(i64, f64, i64);
+    reg_grains_3!(f64, i64, i64);
+    reg_grains_3!(i64, i64, i64);
+    reg_grains_4!(f64, f64, f64, f64);
+    reg_grains_4!(i64, f64, f64, f64);
+    reg_grains_4!(i64, i64, i64, f64);
+    reg_grains_4!(i64, i64, i64, i64);
+    reg_grains_4!(f64, f64, f64, i64);
+
     // ── Transforms ───────────────────────────────────────────
     let take = |s: StreamDef, d: f32| StreamDef::Take {
         source: Box::new(s),
@@ -652,6 +722,67 @@ fn register_unified_dsl(engine: &mut rhai::Engine) {
     });
     engine.register_fn("tremolo", move |s: StreamDef, r: i64, d: i64| {
         tremolo(s, r as f32, d as f32)
+    });
+
+    // pitch(factor) — tape-speed: changes pitch AND duration together.
+    // 0.5 = octave down + double duration; 2.0 = octave up + half.
+    // Composes by multiplication.
+    fn pitch_def(s: StreamDef, factor: f32) -> std::result::Result<StreamDef, Box<EvalAltResult>> {
+        match s {
+            StreamDef::Sample {
+                samples,
+                source_sr,
+                looping,
+                playback_rate,
+                time_stretch,
+            } => Ok(StreamDef::Sample {
+                samples,
+                source_sr,
+                looping,
+                playback_rate: playback_rate * factor,
+                time_stretch,
+            }),
+            _ => Err(
+                "pitch(): only valid on a sample — try sample(\"…\").pitch(0.5)".into(),
+            ),
+        }
+    }
+    engine.register_fn("pitch", move |s: StreamDef, f: f64| {
+        pitch_def(s, f as f32)
+    });
+    engine.register_fn("pitch", move |s: StreamDef, f: i64| {
+        pitch_def(s, f as f32)
+    });
+
+    // speed(factor) — pitch-preserving time stretch (granular OLA).
+    // 0.5 = half speed at same pitch (double duration); 2.0 = double
+    // speed at same pitch (half duration). Composes by multiplication
+    // and is independent of `.pitch(...)`.
+    fn speed_def(s: StreamDef, factor: f32) -> std::result::Result<StreamDef, Box<EvalAltResult>> {
+        match s {
+            StreamDef::Sample {
+                samples,
+                source_sr,
+                looping,
+                playback_rate,
+                time_stretch,
+            } => Ok(StreamDef::Sample {
+                samples,
+                source_sr,
+                looping,
+                playback_rate,
+                time_stretch: time_stretch * factor,
+            }),
+            _ => Err(
+                "speed(): only valid on a sample — try sample(\"…\").speed(0.5)".into(),
+            ),
+        }
+    }
+    engine.register_fn("speed", move |s: StreamDef, f: f64| {
+        speed_def(s, f as f32)
+    });
+    engine.register_fn("speed", move |s: StreamDef, f: i64| {
+        speed_def(s, f as f32)
     });
 
     // fade_out captures the source's finite duration at construction
@@ -737,6 +868,67 @@ fn register_unified_dsl(engine: &mut rhai::Engine) {
                 source: Box::new(s),
                 taps: converted,
             })
+        },
+    );
+}
+
+fn register_sample_dsl(
+    engine: &mut rhai::Engine,
+    project_root: Arc<Mutex<Option<std::path::PathBuf>>>,
+) {
+    fn resolve(
+        project_root: &Arc<Mutex<Option<std::path::PathBuf>>>,
+        path: &str,
+    ) -> std::result::Result<std::path::PathBuf, Box<EvalAltResult>> {
+        let p = std::path::PathBuf::from(path);
+        if p.is_absolute() {
+            return Ok(p);
+        }
+        let guard = project_root.lock().expect("project root poisoned");
+        match guard.as_ref() {
+            Some(root) => Ok(root.join(p)),
+            None => Err(format!(
+                "sample('{path}'): relative path but no project root is set — save the project first, or use an absolute path"
+            )
+            .into()),
+        }
+    }
+
+    fn load(
+        project_root: &Arc<Mutex<Option<std::path::PathBuf>>>,
+        path: ImmutableString,
+        looping: bool,
+    ) -> std::result::Result<StreamDef, Box<EvalAltResult>> {
+        let resolved = resolve(project_root, path.as_str())?;
+        let buffer = crate::decode::decode_file(&resolved).map_err(|e| -> Box<EvalAltResult> {
+            format!(
+                "sample('{}'): {e}",
+                resolved.display()
+            )
+            .into()
+        })?;
+        Ok(StreamDef::Sample {
+            samples: buffer.samples,
+            source_sr: buffer.sample_rate,
+            looping,
+            playback_rate: 1.0,
+            time_stretch: 1.0,
+        })
+    }
+
+    let pr_oneshot = project_root.clone();
+    engine.register_fn(
+        "sample",
+        move |path: ImmutableString| -> std::result::Result<StreamDef, Box<EvalAltResult>> {
+            load(&pr_oneshot, path, false)
+        },
+    );
+
+    let pr_loop = project_root;
+    engine.register_fn(
+        "sample_loop",
+        move |path: ImmutableString| -> std::result::Result<StreamDef, Box<EvalAltResult>> {
+            load(&pr_loop, path, true)
         },
     );
 }

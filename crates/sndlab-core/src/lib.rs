@@ -9,6 +9,7 @@
 //! `sndlab` binary. The split exists so games and batch tools can
 //! embed this engine without dragging in a TUI.
 
+pub mod decode;
 mod engine;
 mod signal;
 mod stream;

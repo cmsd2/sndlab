@@ -24,3 +24,8 @@ cpal = "0.17"
 # from the patch name, so re-evaluating produces the same buffer.
 rand = "0.8"
 rand_pcg = "0.3"
+
+# Decoding sampled audio (MP3/WAV/Ogg/FLAC) for the `sample()`
+# DSL primitive. Same crate the binary already uses for the
+# reference-audio scope overlay; pinned via the workspace.
+symphonia.workspace = true
