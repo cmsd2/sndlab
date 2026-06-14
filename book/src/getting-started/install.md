@@ -35,7 +35,7 @@ A window opens with four panels:
 
 | Key | Action |
 |---|---|
-| `F5` | Evaluate the buffer and play the first registered patch |
+| `F5` | Evaluate the buffer. Trigger one-shots / toggle ambients from the patches row below the toolbar. |
 | toolbar buttons | Trigger any patch by name |
 
 Quit via the window close button.

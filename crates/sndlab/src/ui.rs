@@ -43,7 +43,7 @@ fn toolbar(ui: &mut egui::Ui, app: &mut SndlabApp) {
         ui.label(RichText::new("sndlab").strong());
         ui.separator();
         if ui
-            .button(RichText::new("Eval + Play (F5)").color(Color32::LIGHT_GREEN))
+            .button(RichText::new("Eval (F5)").color(Color32::LIGHT_GREEN))
             .clicked()
         {
             app.eval_and_play();

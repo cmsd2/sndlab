@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use egui_code_editor::{ColorTheme, Syntax};
-use sndlab_core::{Buffer, Engine, PatchRole};
+use sndlab_core::{Buffer, Engine};
 
 use crate::log::LogPane;
 use crate::mcp::{Command, Mailbox};
@@ -187,7 +187,7 @@ impl SndlabApp {
         // and a misleading line above an `open_project_at_path` call
         // from main was a confusing combination.
 
-        Self {
+        let mut app = Self {
             project,
             syntax: Syntax::rust(),
             theme: ColorTheme::AYU_DARK,
@@ -205,7 +205,12 @@ impl SndlabApp {
             live_ambient: false,
             audition_seconds: 4.0,
             live: LiveEvalState::default(),
-        }
+        };
+        // Evaluate the seed/initial project so its patches are
+        // registered and triggerable from the toolbar without an
+        // explicit F5. CLI-loaded projects re-eval after their open.
+        app.eval_silent();
+        app
     }
 
     /// Toggle an ambient loop. If it's playing, stop it; if it isn't,
@@ -302,6 +307,7 @@ impl SndlabApp {
         self.project = crate::project::Project::unsaved("untitled", SEED_PATCH.to_string());
         self.log.info("started a fresh untitled project");
         self.sync_project_root_to_engine();
+        self.eval_silent();
     }
 
     /// Push the active project's root directory to the engine so
@@ -431,6 +437,7 @@ impl SndlabApp {
                     dir.display()
                 );
                 self.sync_project_root_to_engine();
+                self.eval_silent();
                 // Republish the new active buffer so an MCP client that
                 // attached during startup sees the project's content,
                 // not the seed script.
@@ -475,6 +482,7 @@ impl SndlabApp {
                     if n == 1 { "" } else { "s" }
                 ));
                 self.sync_project_root_to_engine();
+                self.eval_silent();
             }
             Err(e) => {
                 self.log.error(format!("open project failed: {e}"));
@@ -689,14 +697,19 @@ impl SndlabApp {
         }
     }
 
-    /// Manual eval (F5 / "Eval + Play" button) — compiles every
-    /// script, reconciles ambient handles, then auto-plays the first
-    /// one-shot patch so the user gets immediate audible feedback.
+    /// Manual eval (F5 / "Eval" button) — compiles every script and
+    /// reconciles ambient handles. Doesn't auto-play any patches; the
+    /// user triggers them explicitly via the patches toolbar (one-shot
+    /// trigger / ambient toggle / ▶ audition).
     pub fn eval_and_play(&mut self) {
-        let played = self.eval_only(true);
-        if !played {
-            // eval_only logged the failure (manual eval is verbose).
-        }
+        let _ = self.eval_only(true);
+    }
+
+    /// Silent eval, used after every project-load entry point (CLI
+    /// startup, Open, New). Lets the user click a patch button
+    /// immediately on launch without having to hit F5 first.
+    pub fn eval_silent(&mut self) {
+        let _ = self.eval_only(false);
     }
 
     /// Note that the user typed (used by the live-eval debounce).
@@ -781,20 +794,10 @@ impl SndlabApp {
                     summary.patches.iter().map(|p| p.name.clone()).collect();
                 self.armed.retain(|n| known.contains(n));
                 self.reconcile_ambient_after_eval(&known);
-                if manual {
-                    if let Some(first) = summary
-                        .patches
-                        .iter()
-                        .find(|p| p.role == PatchRole::OneShot)
-                    {
-                        let name = first.name.clone();
-                        self.play_by_name(&name);
-                        return true;
-                    } else if summary.patches.is_empty() {
-                        self.log.warn(
-                            "no patches registered — script ran but didn't call patch(...)",
-                        );
-                    }
+                if manual && summary.patches.is_empty() {
+                    self.log.warn(
+                        "no patches registered — script ran but didn't call patch(...)",
+                    );
                 }
                 false
             }
