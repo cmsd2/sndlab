@@ -4,6 +4,7 @@
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use egui_code_editor::{ColorTheme, Syntax};
 use sndlab_core::{Buffer, Engine, PatchRole};
@@ -49,11 +50,52 @@ pub struct SndlabApp {
     /// parallel through the mixer.
     pub armed: HashSet<String>,
     /// When `true`, the next eval crossfades currently-playing
-    /// ambient patches to their newly-rendered buffers automatically.
-    /// When `false`, eval doesn't touch playing ambients — they keep
-    /// looping the pre-eval rendering until the user manually
-    /// restarts them.
+    /// ambient patches to their newly-rendered buffers automatically,
+    /// AND the editor auto-evals after the user stops typing for a
+    /// debounce window. When `false`, evals are user-initiated (F5)
+    /// and currently-playing ambients keep looping the pre-eval
+    /// rendering until manually restarted.
     pub live_ambient: bool,
+    /// Live-eval bookkeeping: tracks the last keystroke, the buffer
+    /// content at the last successful eval, and the currently-
+    /// displayed compile/runtime error.
+    pub live: LiveEvalState,
+}
+
+#[derive(Debug, Default)]
+pub struct LiveEvalState {
+    /// Timestamp of the most recent buffer edit, if one is pending
+    /// the debounce window. `None` when nothing's pending.
+    pub last_change: Option<Instant>,
+    /// The buffer contents at the last successful (or attempted)
+    /// eval — used to skip work when nothing has actually changed.
+    pub last_eval_source: String,
+    /// The most recent failure, if the buffer doesn't currently
+    /// compile / evaluate cleanly. Drawn as a banner above the
+    /// editor; logged only after persisting for a while so a
+    /// half-typed expression doesn't fill the log pane.
+    pub error: Option<LiveError>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LiveError {
+    pub message: String,
+    pub started_at: Instant,
+    /// `true` once the error has been written to the log pane.
+    /// Prevents repeated logging while the same error persists.
+    pub logged: bool,
+    /// Source-location detail used to draw the offending line and
+    /// caret in the banner. `None` when Rhai didn't give us a
+    /// position (rare).
+    pub context: Option<ErrorContext>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ErrorContext {
+    pub filename: String,
+    pub line: usize,
+    pub column: usize,
+    pub source_line: String,
 }
 
 /// A blocking confirmation or input dialog rendered on top of the
@@ -152,6 +194,7 @@ impl SndlabApp {
             modal: None,
             armed: HashSet::new(),
             live_ambient: false,
+            live: LiveEvalState::default(),
         }
     }
 
@@ -389,6 +432,11 @@ impl SndlabApp {
             match cmd {
                 Command::SetBuffer(content) => {
                     self.project.set_active_buffer(content);
+                    // Treat MCP edits the same as user typing for
+                    // the live-eval debounce: they restart the timer
+                    // so if the AI keeps editing in quick succession
+                    // we only re-eval once the dust settles.
+                    self.note_typed();
                     self.log.info("MCP applied buffer edit");
                 }
                 Command::Eval => self.eval_and_play(),
@@ -479,51 +527,163 @@ impl SndlabApp {
         }
     }
 
-    /// Compile every script in the project through Rhai (as a single
-    /// concatenated source so the patch namespace is shared across
-    /// files), then auto-play the first patch and capture its
-    /// rendered buffer for the scope.
+    /// Manual eval (F5 / "Eval + Play" button) — compiles every
+    /// script, reconciles ambient handles, then auto-plays the first
+    /// one-shot patch so the user gets immediate audible feedback.
     pub fn eval_and_play(&mut self) {
+        let played = self.eval_only(true);
+        if !played {
+            // eval_only logged the failure (manual eval is verbose).
+        }
+    }
+
+    /// Note that the user typed (used by the live-eval debounce).
+    /// Called from the UI's editor render whenever the buffer
+    /// changes, sets a fresh timer; until the debounce window
+    /// elapses without further keystrokes no auto-eval runs.
+    pub fn note_typed(&mut self) {
+        self.live.last_change = Some(Instant::now());
+    }
+
+    /// Called from the eframe update loop. If `live_ambient` is on
+    /// and the user has stopped typing for the debounce window, run
+    /// an auto-eval. If a live error is active and has persisted
+    /// long enough, log it to the log pane.
+    pub fn pump_live_eval(&mut self) {
+        const DEBOUNCE: Duration = Duration::from_millis(400);
+        const ERROR_LOG_DELAY: Duration = Duration::from_secs(3);
+
+        if self.live_ambient {
+            if let Some(t) = self.live.last_change {
+                if Instant::now().duration_since(t) >= DEBOUNCE {
+                    // Buffer might be unchanged from last_eval if the
+                    // user typed and reverted; auto_eval still re-runs
+                    // (cheap) but we'll skip the reconcile if the
+                    // source hasn't actually changed.
+                    let current = self.project.concatenated_source();
+                    if current != self.live.last_eval_source {
+                        self.auto_eval();
+                    }
+                    self.live.last_change = None;
+                }
+            }
+        }
+
+        // Promote a persistent live error to the log pane once.
+        if let Some(err) = &mut self.live.error {
+            if !err.logged && err.started_at.elapsed() >= ERROR_LOG_DELAY {
+                let msg = err.message.clone();
+                err.logged = true;
+                self.log.error(format!("script still failing: {msg}"));
+            }
+        }
+    }
+
+    /// Auto-eval driven by the typing debounce. Compiles every script
+    /// and reconciles ambient handles, but does NOT trigger a one-
+    /// shot — auto-firing the ping every time you type a character
+    /// is loud and annoying. The user keeps F5 / the toolbar button
+    /// for that.
+    pub fn auto_eval(&mut self) {
+        let _ = self.eval_only(false);
+    }
+
+    /// Single-source eval implementation. `manual` controls whether
+    /// successes/failures are logged immediately (manual evals log
+    /// loudly; auto-evals defer logging via the live-eval state) and
+    /// whether the first one-shot fires. Returns `true` if a one-
+    /// shot was played.
+    fn eval_only(&mut self, manual: bool) -> bool {
         let source = self.project.concatenated_source();
+        self.live.last_eval_source = source.clone();
         match self.engine.eval(&source) {
             Ok(summary) => {
-                self.log.info(format!(
-                    "eval ok — {} patch(es): [{}]",
-                    summary.patches.len(),
-                    summary
-                        .patches
-                        .iter()
-                        .map(|p| p.name.clone())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-                for m in &summary.messages {
-                    self.log.warn(m.clone());
+                self.live.error = None;
+                if manual {
+                    self.log.info(format!(
+                        "eval ok — {} patch(es): [{}]",
+                        summary.patches.len(),
+                        summary
+                            .patches
+                            .iter()
+                            .map(|p| p.name.clone())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                    for m in &summary.messages {
+                        self.log.warn(m.clone());
+                    }
                 }
                 self.set_last_error(None);
-                // Drop any patches from the scene-arm set that no
-                // longer exist; otherwise "fire" would error against
-                // ghosts.
                 let known: HashSet<String> =
                     summary.patches.iter().map(|p| p.name.clone()).collect();
                 self.armed.retain(|n| known.contains(n));
                 self.reconcile_ambient_after_eval(&known);
-                if let Some(first) = summary
-                    .patches
-                    .iter()
-                    .find(|p| p.role == PatchRole::OneShot)
-                {
-                    let name = first.name.clone();
-                    self.play_by_name(&name);
-                } else if summary.patches.is_empty() {
-                    self.log
-                        .warn("no patches registered — script ran but didn't call patch(...)");
+                if manual {
+                    if let Some(first) = summary
+                        .patches
+                        .iter()
+                        .find(|p| p.role == PatchRole::OneShot)
+                    {
+                        let name = first.name.clone();
+                        self.play_by_name(&name);
+                        return true;
+                    } else if summary.patches.is_empty() {
+                        self.log.warn(
+                            "no patches registered — script ran but didn't call patch(...)",
+                        );
+                    }
                 }
+                false
             }
             Err(e) => {
-                let msg = format!("eval failed: {e}");
-                self.log.error(msg.clone());
-                self.set_last_error(Some(msg));
+                let position = match &e {
+                    sndlab_core::Error::Parse { position, .. }
+                    | sndlab_core::Error::Runtime { position, .. } => *position,
+                    _ => None,
+                };
+                let context = position.and_then(|p| {
+                    let (script_idx, local_line) =
+                        self.project.resolve_source_line(p.line)?;
+                    let source_line =
+                        self.project.script_line(script_idx, local_line)?;
+                    Some(ErrorContext {
+                        filename: self
+                            .project
+                            .scripts
+                            .get(script_idx)
+                            .map(|s| s.relative_path.clone())
+                            .unwrap_or_default(),
+                        line: local_line,
+                        column: p.column,
+                        source_line,
+                    })
+                });
+                let msg = format!("{e}");
+                let already_same_error = matches!(
+                    &self.live.error,
+                    Some(existing) if existing.message == msg
+                );
+                if !already_same_error {
+                    self.live.error = Some(LiveError {
+                        message: msg.clone(),
+                        started_at: Instant::now(),
+                        logged: false,
+                        context,
+                    });
+                }
+                if manual {
+                    self.log.error(format!("eval failed: {msg}"));
+                    self.set_last_error(Some(msg));
+                    // The error's already been logged manually; mark
+                    // it so the debounce doesn't re-log it.
+                    if let Some(err) = &mut self.live.error {
+                        err.logged = true;
+                    }
+                } else {
+                    self.set_last_error(Some(msg));
+                }
+                false
             }
         }
     }

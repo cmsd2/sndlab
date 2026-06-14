@@ -46,10 +46,12 @@ impl eframe::App for SndlabApp {
         // any AI edits that arrived this frame land in the editor
         // pane the user is about to see.
         self.pump_mailbox();
+        // Debounced auto-eval + delayed error logging.
+        self.pump_live_eval();
         ui::draw(ui, self);
         // Keep the loop ticking even without user input so MCP-
-        // triggered edits/plays don't sit invisible until the user
-        // moves the mouse. 30 fps is plenty for our needs.
+        // triggered edits/plays and the live-eval timer don't sit
+        // idle until the user moves the mouse. 30 fps is plenty.
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
     }
 }

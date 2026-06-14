@@ -210,6 +210,110 @@ fn scope_pane(ui: &mut egui::Ui, app: &SndlabApp) {
     );
 }
 
+/// Fixed-height status / error banner that sits above the editor.
+/// Always present so the editor's vertical position doesn't shift
+/// when an error appears or clears. Three lines of monospace text:
+/// the header (filename + line:col + message), the offending source
+/// line, and a caret line pointing at the column.
+fn render_status_banner(ui: &mut egui::Ui, app: &SndlabApp) {
+    const ROWS: usize = 3;
+    const FONT_SIZE: f32 = 12.0;
+    // Approximate row height; egui's FontsView doesn't expose a
+    // public per-font query here, but for the bundled monospace
+    // 1.4× the point size matches the actual line height to within
+    // a pixel.
+    let row_h = FONT_SIZE * 1.4;
+    let font_id = egui::FontId::monospace(FONT_SIZE);
+    let inner_pad = 4.0;
+    let total_h = row_h * ROWS as f32 + inner_pad * 2.0;
+
+    let (rect, _) = ui.allocate_exact_size(
+        egui::Vec2::new(ui.available_width(), total_h),
+        egui::Sense::hover(),
+    );
+
+    let (bg, border, fg, muted) = match app.live.error.is_some() {
+        true => (
+            Color32::from_rgb(56, 16, 16),
+            Color32::from_rgb(120, 40, 40),
+            Color32::from_rgb(255, 200, 190),
+            Color32::from_rgb(200, 140, 130),
+        ),
+        false => (
+            Color32::from_rgb(16, 28, 22),
+            Color32::from_rgb(30, 50, 40),
+            Color32::from_rgb(160, 200, 180),
+            Color32::from_rgb(120, 160, 140),
+        ),
+    };
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 2.0, bg);
+    painter.rect_stroke(
+        rect,
+        2.0,
+        egui::Stroke::new(1.0, border),
+        egui::StrokeKind::Inside,
+    );
+
+    let x0 = rect.left() + 8.0;
+    let mut y = rect.top() + inner_pad;
+
+    let header = match &app.live.error {
+        Some(err) => match &err.context {
+            Some(ctx) => format!(
+                "✕ {}:{}:{}  {}",
+                ctx.filename, ctx.line, ctx.column, err.message
+            ),
+            None => format!("✕ {}", err.message),
+        },
+        None => {
+            if app.live_ambient {
+                "✓ live — script ok, ambients will crossfade on edit".to_string()
+            } else {
+                "✓ script ok".to_string()
+            }
+        }
+    };
+    painter.text(
+        egui::Pos2::new(x0, y),
+        egui::Align2::LEFT_TOP,
+        header,
+        font_id.clone(),
+        fg,
+    );
+    y += row_h;
+
+    // If we have full context, show the source line and a caret.
+    if let Some(err) = &app.live.error {
+        if let Some(ctx) = &err.context {
+            painter.text(
+                egui::Pos2::new(x0, y),
+                egui::Align2::LEFT_TOP,
+                &ctx.source_line,
+                font_id.clone(),
+                muted,
+            );
+            y += row_h;
+
+            // Approximate per-character advance for a monospace font.
+            // egui doesn't have a direct "glyph width" API at this
+            // call site, but `row_height * 0.55` is a near-universal
+            // ratio for the bundled monospace and works well for
+            // simple ASCII source.
+            let glyph_w = row_h * 0.55;
+            let caret_col = ctx.column.saturating_sub(1) as f32;
+            let caret = "^";
+            painter.text(
+                egui::Pos2::new(x0 + caret_col * glyph_w, y),
+                egui::Align2::LEFT_TOP,
+                caret,
+                font_id,
+                fg,
+            );
+        }
+    }
+}
+
 fn render_modal(ctx: &egui::Context, app: &mut SndlabApp) {
     let Some(modal) = app.modal.clone() else {
         return;
@@ -342,6 +446,13 @@ fn default_new_filename(app: &SndlabApp) -> String {
 }
 
 fn editor(ui: &mut egui::Ui, app: &mut SndlabApp) {
+    // Live-eval status banner. Always rendered with the same
+    // vertical footprint so the editor doesn't pop up/down as
+    // errors come and go — sized to fit three monospace lines plus
+    // padding (header, source line, caret), which is the worst-case
+    // content.
+    render_status_banner(ui, app);
+
     // Tabs across the top: one per script. Click to switch active.
     // Right-click for Rename / Delete. A "+" tab at the end creates
     // a new script.
@@ -420,5 +531,6 @@ fn editor(ui: &mut egui::Ui, app: &mut SndlabApp) {
     let buffer_addr_after = app.project.active_buffer().as_ptr();
     if before_len != after_len || buffer_addr_before != buffer_addr_after {
         app.project.mark_active_dirty();
+        app.note_typed();
     }
 }

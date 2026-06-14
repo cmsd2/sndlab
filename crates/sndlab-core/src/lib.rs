@@ -19,14 +19,30 @@ use std::sync::Arc;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("rhai parse error: {0}")]
-    Parse(String),
-    #[error("rhai runtime error: {0}")]
-    Runtime(String),
+    #[error("rhai parse error: {message}")]
+    Parse {
+        message: String,
+        /// Position in the source where the parser gave up (1-based).
+        /// `None` when Rhai didn't supply a position.
+        position: Option<SourcePos>,
+    },
+    #[error("rhai runtime error: {message}")]
+    Runtime {
+        message: String,
+        position: Option<SourcePos>,
+    },
     #[error("audio backend error: {0}")]
     Audio(String),
     #[error("no patch named '{0}'")]
     UnknownPatch(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourcePos {
+    /// 1-based line number in the source given to `Engine::eval`.
+    pub line: usize,
+    /// 1-based column.
+    pub column: usize,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

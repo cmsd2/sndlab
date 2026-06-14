@@ -19,6 +19,16 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// Where a script lives in the concatenated source. Used by the
+/// editor to map a Rhai error's line number back to a specific
+/// script + local line.
+#[derive(Debug, Clone, Copy)]
+pub struct ScriptLineRange {
+    pub script_index: usize,
+    pub first_line: usize,
+    pub last_line: usize,
+}
+
 /// Persisted form of a project. Lives at `<project_dir>/project.ron`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
@@ -191,15 +201,62 @@ impl Project {
     /// Concatenate every script's buffer with a separator comment.
     /// This is what gets handed to the engine to evaluate.
     pub fn concatenated_source(&self) -> String {
+        self.concatenated_source_with_map().0
+    }
+
+    /// Concatenated source plus a per-script line range. Each entry
+    /// is `(script_index, first_line_of_buffer, last_line_of_buffer)`
+    /// in the concatenated output (1-based). Used to map a Rhai
+    /// error's line number back to `(script, line_in_script)`.
+    pub fn concatenated_source_with_map(&self) -> (String, Vec<ScriptLineRange>) {
         let mut out = String::new();
-        for s in &self.scripts {
+        let mut ranges = Vec::with_capacity(self.scripts.len());
+        let mut current_line = 1; // 1-based
+        for (i, s) in self.scripts.iter().enumerate() {
+            // The header occupies one line: "// ─── name ───\n".
             out.push_str(&format!("// ─── {} ───\n", s.relative_path));
+            current_line += 1;
+            let buffer_first_line = current_line;
             out.push_str(&s.buffer);
+            let mut buffer_lines = s.buffer.matches('\n').count();
             if !s.buffer.ends_with('\n') {
                 out.push('\n');
+                buffer_lines += 1;
+            }
+            current_line += buffer_lines;
+            let buffer_last_line = current_line - 1;
+            ranges.push(ScriptLineRange {
+                script_index: i,
+                first_line: buffer_first_line,
+                last_line: buffer_last_line,
+            });
+        }
+        (out, ranges)
+    }
+
+    /// Given a Rhai error's absolute line in the concatenated source,
+    /// resolve `(script_index, line_within_script)`. Lines are 1-based.
+    pub fn resolve_source_line(
+        &self,
+        absolute_line: usize,
+    ) -> Option<(usize, usize)> {
+        let (_, ranges) = self.concatenated_source_with_map();
+        for r in &ranges {
+            if absolute_line >= r.first_line && absolute_line <= r.last_line {
+                return Some((r.script_index, absolute_line - r.first_line + 1));
             }
         }
-        out
+        None
+    }
+
+    /// Fetch a specific line from a script (1-based).
+    pub fn script_line(&self, script_index: usize, line_in_script: usize) -> Option<String> {
+        let script = self.scripts.get(script_index)?;
+        script
+            .buffer
+            .lines()
+            .nth(line_in_script.saturating_sub(1))
+            .map(|s| s.to_string())
     }
 
     /// Write every dirty script back to disk and (re)write the

@@ -13,10 +13,19 @@ use std::time::Duration;
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle, StaticSoundSettings};
 use kira::{AudioManager, AudioManagerSettings, DefaultBackend, Frame, Tween};
 use rand_pcg::Pcg64;
-use rhai::{Array, Dynamic, ImmutableString, EvalAltResult};
+use rhai::{Array, Dynamic, ImmutableString, EvalAltResult, Position};
 
 use crate::signal::{self, NoiseKind, Signal, Tap};
-use crate::{Buffer, Error, EvalSummary, PatchInfo, PatchRole, Result};
+use crate::{Buffer, Error, EvalSummary, PatchInfo, PatchRole, Result, SourcePos};
+
+fn convert_position(pos: Position) -> Option<SourcePos> {
+    let line = pos.line()?;
+    let column = pos.position().unwrap_or(1);
+    Some(SourcePos {
+        line: line as usize,
+        column: column as usize,
+    })
+}
 
 /// A patch as the engine knows it: the rendered buffer plus its role.
 #[derive(Clone)]
@@ -94,9 +103,13 @@ impl Engine {
 
         self.rhai
             .run(source)
-            .map_err(|e| match *e {
-                EvalAltResult::ErrorParsing(..) => Error::Parse(e.to_string()),
-                _ => Error::Runtime(e.to_string()),
+            .map_err(|e| {
+                let position = convert_position(e.position());
+                let message = e.to_string();
+                match *e {
+                    EvalAltResult::ErrorParsing(..) => Error::Parse { message, position },
+                    _ => Error::Runtime { message, position },
+                }
             })?;
 
         // Drain into the engine's owned tables.
