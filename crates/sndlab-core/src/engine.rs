@@ -193,6 +193,29 @@ impl Engine {
         })
     }
 
+    /// Play an arbitrary buffer through the one-shot path. Used by the
+    /// editor's audition feature to play a sliced ambient. Silently
+    /// no-ops if the audio backend failed to initialise or the buffer
+    /// is empty.
+    pub fn play_buffer(&mut self, buffer: &Buffer) -> Result<()> {
+        if buffer.samples.is_empty() {
+            return Ok(());
+        }
+        let Some(manager) = self.audio.as_mut() else {
+            return Ok(());
+        };
+        let frames: Vec<Frame> =
+            buffer.samples.iter().map(|s| Frame::from_mono(*s)).collect();
+        let data = StaticSoundData {
+            sample_rate: buffer.sample_rate,
+            frames: frames.into(),
+            settings: StaticSoundSettings::default(),
+            slice: None,
+        };
+        manager.play(data).map_err(|e| Error::Audio(e.to_string()))?;
+        Ok(())
+    }
+
     /// Play a patch by name as a one-shot. Returns an error if the
     /// patch isn't registered. Streaming patches are not playable as
     /// one-shots — they have no end — so this logs a warning and
@@ -372,6 +395,44 @@ impl Engine {
     /// Whether a named patch is currently looping as ambient.
     pub fn is_ambient_playing(&self, name: &str) -> bool {
         self.ambient_handles.contains_key(name)
+    }
+
+    /// Render a finite slice of a streaming (ambient) patch, for
+    /// audition. Spawns a fresh stream runner, ticks `duration_s`
+    /// worth of samples, and returns the result as a Buffer. Useful
+    /// for live-coding: you keep the patch declared as ambient (it
+    /// runs forever in the game) but slice off N seconds in the editor
+    /// to play through the scope without re-tuning a separate one-shot
+    /// version. Buffer patches (one-shots) also work — they're just
+    /// returned via `render`, capped by the slice duration.
+    pub fn render_slice(&self, name: &str, duration_s: f32) -> Result<Buffer> {
+        let patch = self
+            .patches
+            .get(name)
+            .ok_or_else(|| Error::UnknownPatch(name.into()))?;
+        let target_samples =
+            (duration_s.max(0.0) * crate::signal::SAMPLE_RATE as f32) as usize;
+        match &patch.source {
+            PatchSource::Buffer {
+                samples,
+                sample_rate,
+            } => {
+                // For one-shots, just truncate at the slice length.
+                let take = target_samples.min(samples.len());
+                Ok(Buffer {
+                    sample_rate: *sample_rate,
+                    samples: samples[..take].to_vec().into(),
+                })
+            }
+            PatchSource::Stream(def) => {
+                let stream = def.instantiate();
+                let samples = crate::stream::render_to_buffer(stream, target_samples);
+                Ok(Buffer {
+                    sample_rate: crate::signal::SAMPLE_RATE,
+                    samples: samples.into(),
+                })
+            }
+        }
     }
 
     /// Render a patch to a `Buffer` without playing it. Returns an

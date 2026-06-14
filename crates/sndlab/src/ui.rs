@@ -104,6 +104,19 @@ fn patches_toolbar(ui: &mut egui::Ui, app: &mut SndlabApp) {
                                 "Crossfade currently-playing ambients into the new \
                                  buffer on every eval (live-coding mode).",
                             );
+                        ui.label("slice");
+                        ui.add(
+                            egui::DragValue::new(&mut app.audition_seconds)
+                                .speed(0.1)
+                                .range(0.1..=60.0)
+                                .suffix(" s"),
+                        )
+                        .on_hover_text(
+                            "Duration sliced off an ambient stream when you hit \
+                             the ▶ button. Keeps the patch declared as ambient \
+                             (so the game gets the unbounded stream) while you \
+                             tune the opening here.",
+                        );
                         ambient_present = true;
                     }
                     let playing = app.engine.is_ambient_playing(name);
@@ -114,6 +127,16 @@ fn patches_toolbar(ui: &mut egui::Ui, app: &mut SndlabApp) {
                     };
                     if ui.small_button(label).clicked() {
                         app.toggle_ambient(name);
+                    }
+                    if ui
+                        .small_button("▶")
+                        .on_hover_text(format!(
+                            "Audition {:.2}s of '{}' through the scope",
+                            app.audition_seconds, name
+                        ))
+                        .clicked()
+                    {
+                        app.audition(name);
                     }
                 }
                 PatchRole::OneShot => {

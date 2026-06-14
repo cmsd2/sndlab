@@ -282,13 +282,25 @@ impl StreamDef {
             Self::Delay { source, delay_s } => {
                 source.finite_duration_s().map(|d| d + delay_s.max(0.0))
             }
-            Self::Mix(parts) => parts.iter().filter_map(|p| p.finite_duration_s()).fold(
-                None,
-                |acc, d| match acc {
-                    Some(prev) => Some(prev.max(d)),
-                    None => Some(d),
-                },
-            ),
+            Self::Mix(parts) => {
+                // Mix runs until *every* source has returned None. If
+                // any source is unbounded the mix is unbounded too —
+                // returning Some(max_of_finite_parts) here would cause
+                // a wrapping `fade_out` to terminate the stream at the
+                // longest finite layer's end, cutting off the
+                // ambient. Only if every part is finite is the mix
+                // finite, with duration = the longest of them.
+                let mut max_dur: Option<f32> = None;
+                for p in parts {
+                    match p.finite_duration_s() {
+                        Some(d) => {
+                            max_dur = Some(max_dur.map_or(d, |m| m.max(d)));
+                        }
+                        None => return None,
+                    }
+                }
+                max_dur
+            }
             Self::Sample {
                 samples,
                 source_sr,

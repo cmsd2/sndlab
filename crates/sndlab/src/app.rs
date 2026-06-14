@@ -56,6 +56,12 @@ pub struct SndlabApp {
     /// and currently-playing ambients keep looping the pre-eval
     /// rendering until manually restarted.
     pub live_ambient: bool,
+    /// Audition slice length (seconds). When the user hits "▶ slice"
+    /// on an ambient patch, sndlab renders this many seconds of the
+    /// stream and plays it through the one-shot path so they can hear
+    /// + see the rendered transition without having to declare a
+    /// separate finite version of the patch.
+    pub audition_seconds: f32,
     /// Live-eval bookkeeping: tracks the last keystroke, the buffer
     /// content at the last successful eval, and the currently-
     /// displayed compile/runtime error.
@@ -197,6 +203,7 @@ impl SndlabApp {
             modal: None,
             armed: HashSet::new(),
             live_ambient: false,
+            audition_seconds: 4.0,
             live: LiveEvalState::default(),
         }
     }
@@ -561,6 +568,42 @@ impl SndlabApp {
         m.current_patches = patches_snapshot;
         m.playing_ambients = playing_ambients;
         m.live_ambient = live_ambient;
+    }
+
+    /// Audition a finite slice of any patch — ambient or one-shot.
+    /// Renders `self.audition_seconds` of the patch (through the
+    /// streaming runner for ambients), shows it on the scope, and
+    /// plays it through the one-shot path. Lets the user keep the
+    /// patch declared as ambient for the game while still tuning the
+    /// opening of the stream in the editor.
+    pub fn audition(&mut self, name: &str) {
+        let dur = self.audition_seconds.max(0.0);
+        match self.engine.render_slice(name, dur) {
+            Ok(buf) => {
+                self.set_last_buffer(buf.clone());
+                match self.engine.play_buffer(&buf) {
+                    Ok(()) => {
+                        self.log.audio(format!(
+                            "auditioning '{}' for {:.2}s ({} samples)",
+                            name,
+                            dur,
+                            buf.samples.len()
+                        ));
+                        self.set_last_error(None);
+                    }
+                    Err(e) => {
+                        let msg = format!("audition '{name}' play failed: {e}");
+                        self.log.error(msg.clone());
+                        self.set_last_error(Some(msg));
+                    }
+                }
+            }
+            Err(e) => {
+                let msg = format!("audition '{name}' render failed: {e}");
+                self.log.error(msg.clone());
+                self.set_last_error(Some(msg));
+            }
+        }
     }
 
     /// Play a specific patch (used by toolbar buttons and by the
