@@ -2,10 +2,11 @@
 //! the log, and the last rendered audio buffer (so the scope can show
 //! it). Rendering is in `ui::draw`.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use egui_code_editor::{ColorTheme, Syntax};
-use sndlab_core::{Buffer, Engine};
+use sndlab_core::{Buffer, Engine, PatchRole};
 
 use crate::log::LogPane;
 use crate::mcp::{Command, Mailbox};
@@ -43,6 +44,16 @@ pub struct SndlabApp {
     pub mailbox: Option<Arc<Mutex<Mailbox>>>,
     /// Active confirmation / input modal, if any.
     pub modal: Option<Modal>,
+    /// One-shot patches the user has "armed" for the scene-fire
+    /// button. Triggering the scene plays every armed patch in
+    /// parallel through the mixer.
+    pub armed: HashSet<String>,
+    /// When `true`, the next eval crossfades currently-playing
+    /// ambient patches to their newly-rendered buffers automatically.
+    /// When `false`, eval doesn't touch playing ambients — they keep
+    /// looping the pre-eval rendering until the user manually
+    /// restarts them.
+    pub live_ambient: bool,
 }
 
 /// A blocking confirmation or input dialog rendered on top of the
@@ -139,6 +150,73 @@ impl SndlabApp {
             mcp_endpoint: format!("http://127.0.0.1:{MCP_PORT}/mcp"),
             mailbox: Some(mailbox),
             modal: None,
+            armed: HashSet::new(),
+            live_ambient: false,
+        }
+    }
+
+    /// Toggle an ambient loop. If it's playing, stop it; if it isn't,
+    /// start it.
+    pub fn toggle_ambient(&mut self, name: &str) {
+        if self.engine.is_ambient_playing(name) {
+            self.engine.stop_ambient(name);
+            self.log.audio(format!("stopped ambient '{name}'"));
+        } else {
+            match self.engine.play_ambient(name) {
+                Ok(()) => self.log.audio(format!("started ambient '{name}'")),
+                Err(e) => self.log.error(format!("ambient start failed: {e}")),
+            }
+        }
+    }
+
+    /// Add or remove a one-shot patch from the scene-arm set.
+    pub fn toggle_arm(&mut self, name: &str) {
+        if !self.armed.remove(name) {
+            self.armed.insert(name.to_string());
+        }
+    }
+
+    /// Trigger every armed one-shot in parallel through the mixer.
+    pub fn fire_scene(&mut self) {
+        if self.armed.is_empty() {
+            self.log.warn("scene fire: nothing armed");
+            return;
+        }
+        let names: Vec<String> = self.armed.iter().cloned().collect();
+        self.log
+            .audio(format!("scene fire: {} patches", names.len()));
+        for name in names {
+            self.play_by_name(&name);
+        }
+    }
+
+    /// After an eval, decide what to do with currently-playing
+    /// ambient loops:
+    ///
+    /// - Patches that no longer exist in the new patch table get
+    ///   their handles dropped (with a quick fade).
+    /// - Patches that still exist:
+    ///   - If `live_ambient` is on, crossfade to the new buffer so
+    ///     the user hears their code changes immediately.
+    ///   - If `live_ambient` is off, leave the existing loop running
+    ///     — Kira keeps playing the pre-eval rendering until the
+    ///     user manually toggles.
+    fn reconcile_ambient_after_eval(&mut self, known: &HashSet<String>) {
+        const CROSSFADE_MS: u64 = 200;
+        let playing = self.engine.ambient_names();
+        for name in playing {
+            if !known.contains(&name) {
+                self.engine.stop_ambient_with_fade(&name, CROSSFADE_MS);
+                self.log
+                    .audio(format!("ambient '{name}' removed — faded out"));
+                continue;
+            }
+            if self.live_ambient {
+                if let Err(e) = self.engine.crossfade_ambient(&name, CROSSFADE_MS) {
+                    self.log
+                        .error(format!("ambient '{name}' crossfade failed: {e}"));
+                }
+            }
         }
     }
 
@@ -423,10 +501,21 @@ impl SndlabApp {
                     self.log.warn(m.clone());
                 }
                 self.set_last_error(None);
-                if let Some(first) = summary.patches.first() {
+                // Drop any patches from the scene-arm set that no
+                // longer exist; otherwise "fire" would error against
+                // ghosts.
+                let known: HashSet<String> =
+                    summary.patches.iter().map(|p| p.name.clone()).collect();
+                self.armed.retain(|n| known.contains(n));
+                self.reconcile_ambient_after_eval(&known);
+                if let Some(first) = summary
+                    .patches
+                    .iter()
+                    .find(|p| p.role == PatchRole::OneShot)
+                {
                     let name = first.name.clone();
                     self.play_by_name(&name);
-                } else {
+                } else if summary.patches.is_empty() {
                     self.log
                         .warn("no patches registered — script ran but didn't call patch(...)");
                 }

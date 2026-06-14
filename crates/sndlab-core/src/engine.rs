@@ -8,9 +8,10 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use kira::sound::static_sound::{StaticSoundData, StaticSoundSettings};
-use kira::{AudioManager, AudioManagerSettings, DefaultBackend, Frame};
+use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle, StaticSoundSettings};
+use kira::{AudioManager, AudioManagerSettings, DefaultBackend, Frame, Tween};
 use rand_pcg::Pcg64;
 use rhai::{Array, Dynamic, ImmutableString, EvalAltResult};
 
@@ -42,6 +43,10 @@ pub struct Engine {
     patches: HashMap<String, Patch>,
     patches_order: Vec<String>,
     patches_info: Vec<PatchInfo>,
+    /// Active looping ambient playbacks, keyed by patch name.
+    /// Cleared on every `eval` so stale handles from re-defined
+    /// patches don't outlive their source.
+    ambient_handles: HashMap<String, StaticSoundHandle>,
 }
 
 impl Engine {
@@ -62,6 +67,7 @@ impl Engine {
             patches: HashMap::new(),
             patches_order: Vec::new(),
             patches_info: Vec::new(),
+            ambient_handles: HashMap::new(),
         })
     }
 
@@ -73,7 +79,10 @@ impl Engine {
     }
 
     /// Evaluate a Rhai script. On success, replaces the engine's
-    /// patch table with whatever the script registered.
+    /// patch table with whatever the script registered. Ambient
+    /// handles are intentionally *not* touched here — the caller
+    /// decides whether to keep, stop, or crossfade them after seeing
+    /// what the new patch table looks like.
     pub fn eval(&mut self, source: &str) -> Result<EvalSummary> {
         // Reset shared state before each eval so a script that doesn't
         // call `patch(...)` ends up with an empty patch table rather
@@ -137,6 +146,113 @@ impl Engine {
         };
         manager.play(data).map_err(|e| Error::Audio(e.to_string()))?;
         Ok(())
+    }
+
+    /// Play a patch on a continuous loop and keep its handle so the
+    /// caller can stop it later via `stop_ambient`. If the patch is
+    /// already playing as ambient, stops the current loop and restarts
+    /// — useful when the patch has changed since the last play.
+    pub fn play_ambient(&mut self, name: &str) -> Result<()> {
+        let patch = self
+            .patches
+            .get(name)
+            .ok_or_else(|| Error::UnknownPatch(name.into()))?
+            .clone();
+        let Some(manager) = self.audio.as_mut() else {
+            return Ok(());
+        };
+        // Stop any existing handle before issuing a new one.
+        if let Some(mut handle) = self.ambient_handles.remove(name) {
+            handle.stop(Tween::default());
+        }
+        let frames: Vec<Frame> = patch.samples.iter().map(|s| Frame::from_mono(*s)).collect();
+        let data = StaticSoundData {
+            sample_rate: patch.sample_rate,
+            frames: frames.into(),
+            settings: StaticSoundSettings::default().loop_region(0.0..),
+            slice: None,
+        };
+        let handle = manager.play(data).map_err(|e| Error::Audio(e.to_string()))?;
+        self.ambient_handles.insert(name.to_string(), handle);
+        Ok(())
+    }
+
+    /// Stop a specific ambient loop. No-op if it isn't playing.
+    pub fn stop_ambient(&mut self, name: &str) {
+        if let Some(mut handle) = self.ambient_handles.remove(name) {
+            handle.stop(Tween::default());
+        }
+    }
+
+    /// Stop a specific ambient loop with a fade-out tween. Drops the
+    /// handle immediately — Kira continues the fade internally and
+    /// the sound terminates itself at silence.
+    pub fn stop_ambient_with_fade(&mut self, name: &str, fade_ms: u64) {
+        if let Some(mut handle) = self.ambient_handles.remove(name) {
+            handle.stop(Tween {
+                duration: Duration::from_millis(fade_ms),
+                ..Tween::default()
+            });
+        }
+    }
+
+    /// Live-coding crossfade: start the patch's *current* buffer
+    /// playing as a new ambient instance, and fade out the previous
+    /// instance for this same patch name over `fade_ms`. During the
+    /// fade both instances are audible together; for short fade
+    /// windows (~100–300 ms) the overlap is heard as a smooth
+    /// transition.
+    ///
+    /// If nothing is currently playing under this name, behaves like
+    /// `play_ambient` — starts the new instance with no fade-out.
+    pub fn crossfade_ambient(&mut self, name: &str, fade_ms: u64) -> Result<()> {
+        // Stop the old one first (with fade). We drop the handle —
+        // Kira finishes the fade-out on its own.
+        if let Some(mut old) = self.ambient_handles.remove(name) {
+            old.stop(Tween {
+                duration: Duration::from_millis(fade_ms),
+                ..Tween::default()
+            });
+        }
+        // Start the new instance. It plays at full level immediately;
+        // the old one fading down gives the perceptual crossfade.
+        let patch = self
+            .patches
+            .get(name)
+            .ok_or_else(|| Error::UnknownPatch(name.into()))?
+            .clone();
+        let Some(manager) = self.audio.as_mut() else {
+            return Ok(());
+        };
+        let frames: Vec<Frame> = patch.samples.iter().map(|s| Frame::from_mono(*s)).collect();
+        let data = StaticSoundData {
+            sample_rate: patch.sample_rate,
+            frames: frames.into(),
+            settings: StaticSoundSettings::default().loop_region(0.0..),
+            slice: None,
+        };
+        let handle = manager.play(data).map_err(|e| Error::Audio(e.to_string()))?;
+        self.ambient_handles.insert(name.to_string(), handle);
+        Ok(())
+    }
+
+    /// Names of every ambient currently playing. Used by the host
+    /// to decide what to crossfade after an eval.
+    pub fn ambient_names(&self) -> Vec<String> {
+        self.ambient_handles.keys().cloned().collect()
+    }
+
+    /// Stop every ambient loop. Called automatically at the start of
+    /// each `eval` so stale loops don't outlive their patches.
+    pub fn stop_all_ambient(&mut self) {
+        for (_, mut handle) in self.ambient_handles.drain() {
+            handle.stop(Tween::default());
+        }
+    }
+
+    /// Whether a named patch is currently looping as ambient.
+    pub fn is_ambient_playing(&self, name: &str) -> bool {
+        self.ambient_handles.contains_key(name)
     }
 
     /// Render a patch to a `Buffer` without playing it. Useful for

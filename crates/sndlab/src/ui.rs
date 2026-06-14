@@ -7,6 +7,8 @@
 use egui::{Color32, RichText};
 use egui_code_editor::CodeEditor;
 
+use sndlab_core::PatchRole;
+
 use crate::app::{Modal, PendingAction, SndlabApp};
 use crate::log::LogKind;
 use crate::scope;
@@ -67,15 +69,70 @@ fn toolbar(ui: &mut egui::Ui, app: &mut SndlabApp) {
             .iter()
             .map(|p| (p.name.clone(), p.duration_s))
             .collect();
-        if !patches.is_empty() {
-            ui.label("Play:");
-            for (name, dur) in patches {
-                if ui
-                    .small_button(format!("{} ({:.1}s)", name, dur))
-                    .clicked()
-                {
-                    app.play_by_name(&name);
+        // Split patches by role so the controls match what each
+        // does: ambient = toggle on/off (lit when looping), one-shot
+        // = trigger + arm.
+        let patches: Vec<(String, PatchRole, f32)> = app
+            .engine
+            .patches()
+            .iter()
+            .map(|p| (p.name.clone(), p.role, p.duration_s))
+            .collect();
+        let mut ambient_present = false;
+        let mut one_shot_present = false;
+        for (name, role, dur) in &patches {
+            match role {
+                PatchRole::Ambient => {
+                    if !ambient_present {
+                        ui.label("Ambient:");
+                        ui.checkbox(&mut app.live_ambient, "Live")
+                            .on_hover_text(
+                                "Crossfade currently-playing ambients into the new \
+                                 buffer on every eval (live-coding mode).",
+                            );
+                        ambient_present = true;
+                    }
+                    let playing = app.engine.is_ambient_playing(name);
+                    let label = if playing {
+                        RichText::new(format!("● {}", name)).color(Color32::LIGHT_GREEN)
+                    } else {
+                        RichText::new(format!("○ {}", name))
+                    };
+                    if ui.small_button(label).clicked() {
+                        app.toggle_ambient(name);
+                    }
                 }
+                PatchRole::OneShot => {
+                    if !one_shot_present {
+                        if ambient_present {
+                            ui.separator();
+                        }
+                        ui.label("One-shot:");
+                        one_shot_present = true;
+                    }
+                    if ui
+                        .small_button(format!("{} ({:.1}s)", name, dur))
+                        .clicked()
+                    {
+                        app.play_by_name(name);
+                    }
+                    let mut armed = app.armed.contains(name);
+                    if ui.checkbox(&mut armed, "arm").changed() {
+                        app.toggle_arm(name);
+                    }
+                }
+            }
+        }
+        if !app.armed.is_empty() {
+            ui.separator();
+            if ui
+                .button(
+                    RichText::new(format!("Fire scene ({})", app.armed.len()))
+                        .color(Color32::LIGHT_YELLOW),
+                )
+                .clicked()
+            {
+                app.fire_scene();
             }
         }
         ui.separator();
