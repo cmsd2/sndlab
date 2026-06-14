@@ -12,6 +12,8 @@ use std::time::Duration;
 
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle, StaticSoundSettings};
 use kira::{AudioManager, AudioManagerSettings, DefaultBackend, Frame, Tween};
+
+use crate::stream::{StreamDef, StreamingSoundData, StreamingSoundHandle};
 use rand_pcg::Pcg64;
 use rhai::{Array, Dynamic, ImmutableString, EvalAltResult, Position};
 
@@ -27,12 +29,23 @@ fn convert_position(pos: Position) -> Option<SourcePos> {
     })
 }
 
-/// A patch as the engine knows it: the rendered buffer plus its role.
+/// A patch as the engine knows it. Two source types: a pre-rendered
+/// buffer (for one-shot patches and for the existing
+/// buffer-based ambient path) or a streaming graph (for the new
+/// continuously-generated ambient path).
 #[derive(Clone)]
 struct Patch {
     role: PatchRole,
-    samples: Arc<[f32]>,
-    sample_rate: u32,
+    source: PatchSource,
+}
+
+#[derive(Clone)]
+enum PatchSource {
+    Buffer {
+        samples: Arc<[f32]>,
+        sample_rate: u32,
+    },
+    Stream(StreamDef),
 }
 
 /// Shared state mutated by Rhai callbacks during evaluation. Wrapped
@@ -55,7 +68,34 @@ pub struct Engine {
     /// Active looping ambient playbacks, keyed by patch name.
     /// Cleared on every `eval` so stale handles from re-defined
     /// patches don't outlive their source.
-    ambient_handles: HashMap<String, StaticSoundHandle>,
+    ambient_handles: HashMap<String, AmbientHandle>,
+}
+
+/// One live ambient instance. Buffer-based handles control a
+/// looped StaticSoundData; stream-based handles control a custom
+/// streaming Sound that generates samples on the fly.
+enum AmbientHandle {
+    Buffer(StaticSoundHandle),
+    Stream(StreamingSoundHandle),
+}
+
+impl AmbientHandle {
+    fn stop_instant(self) {
+        match self {
+            Self::Buffer(mut h) => h.stop(Tween::default()),
+            Self::Stream(h) => h.stop(0),
+        }
+    }
+
+    fn stop_with_fade(self, fade_ms: u64) {
+        match self {
+            Self::Buffer(mut h) => h.stop(Tween {
+                duration: std::time::Duration::from_millis(fade_ms),
+                ..Tween::default()
+            }),
+            Self::Stream(h) => h.stop(fade_ms),
+        }
+    }
 }
 
 impl Engine {
@@ -120,7 +160,14 @@ impl Engine {
                 self.patches.get(name).map(|p| PatchInfo {
                     name: name.clone(),
                     role: p.role,
-                    duration_s: p.samples.len() as f32 / p.sample_rate as f32,
+                    duration_s: match &p.source {
+                        PatchSource::Buffer {
+                            samples,
+                            sample_rate,
+                        } => samples.len() as f32 / *sample_rate as f32,
+                        // Stream patches are unbounded; report 0.
+                        PatchSource::Stream(_) => 0.0,
+                    },
                 })
             })
             .collect();
@@ -131,16 +178,30 @@ impl Engine {
         })
     }
 
-    /// Play a patch by name. Returns an error if the patch isn't
-    /// registered. Silently no-ops if the audio backend failed to
-    /// initialise; the caller should check `has_audio()` if it cares.
+    /// Play a patch by name as a one-shot. Returns an error if the
+    /// patch isn't registered. Streaming patches are not playable as
+    /// one-shots — they have no end — so this logs a warning and
+    /// returns Ok for that case. Silently no-ops if the audio
+    /// backend failed to initialise.
     pub fn play(&mut self, name: &str) -> Result<()> {
         let patch = self
             .patches
             .get(name)
             .ok_or_else(|| Error::UnknownPatch(name.into()))?
             .clone();
-        if patch.samples.is_empty() {
+        let (samples, sample_rate) = match &patch.source {
+            PatchSource::Buffer {
+                samples,
+                sample_rate,
+            } => (samples.clone(), *sample_rate),
+            PatchSource::Stream(_) => {
+                tracing::warn!(
+                    "play({name}): patch is streaming-only — use play_ambient instead"
+                );
+                return Ok(());
+            }
+        };
+        if samples.is_empty() {
             tracing::warn!("play({name}): patch rendered to 0 samples — nothing to play");
             return Ok(());
         }
@@ -148,9 +209,9 @@ impl Engine {
             tracing::debug!("play({name}): audio unavailable, dropping");
             return Ok(());
         };
-        let frames: Vec<Frame> = patch.samples.iter().map(|s| Frame::from_mono(*s)).collect();
+        let frames: Vec<Frame> = samples.iter().map(|s| Frame::from_mono(*s)).collect();
         let data = StaticSoundData {
-            sample_rate: patch.sample_rate,
+            sample_rate,
             frames: frames.into(),
             settings: StaticSoundSettings::default(),
             slice: None,
@@ -159,107 +220,122 @@ impl Engine {
         Ok(())
     }
 
-    /// Play a patch on a continuous loop and keep its handle so the
-    /// caller can stop it later via `stop_ambient`. If the patch is
-    /// already playing as ambient, stops the current loop and restarts
-    /// — useful when the patch has changed since the last play.
+    /// Play a patch as a continuous ambient. Routes to either a
+    /// looped buffer (legacy) or a streaming generator depending on
+    /// how the patch was registered. The handle is stashed so the
+    /// caller can stop it later.
     pub fn play_ambient(&mut self, name: &str) -> Result<()> {
         let patch = self
             .patches
             .get(name)
             .ok_or_else(|| Error::UnknownPatch(name.into()))?
             .clone();
-        if patch.samples.is_empty() {
-            tracing::warn!(
-                "play_ambient({name}): patch rendered to 0 samples — nothing to loop"
-            );
-            // Stop any previous loop for this name so we don't leave
-            // a stale handle around for a patch that's now silent.
-            if let Some(mut handle) = self.ambient_handles.remove(name) {
-                handle.stop(Tween::default());
-            }
-            return Ok(());
+        // Stop whatever's currently playing for this name.
+        if let Some(old) = self.ambient_handles.remove(name) {
+            old.stop_instant();
         }
         let Some(manager) = self.audio.as_mut() else {
             return Ok(());
         };
-        // Stop any existing handle before issuing a new one.
-        if let Some(mut handle) = self.ambient_handles.remove(name) {
-            handle.stop(Tween::default());
-        }
-        let frames: Vec<Frame> = patch.samples.iter().map(|s| Frame::from_mono(*s)).collect();
-        let data = StaticSoundData {
-            sample_rate: patch.sample_rate,
-            frames: frames.into(),
-            settings: StaticSoundSettings::default().loop_region(0.0..),
-            slice: None,
+        let handle = match &patch.source {
+            PatchSource::Buffer {
+                samples,
+                sample_rate,
+            } => {
+                if samples.is_empty() {
+                    tracing::warn!(
+                        "play_ambient({name}): patch rendered to 0 samples — nothing to loop"
+                    );
+                    return Ok(());
+                }
+                let frames: Vec<Frame> =
+                    samples.iter().map(|s| Frame::from_mono(*s)).collect();
+                let data = StaticSoundData {
+                    sample_rate: *sample_rate,
+                    frames: frames.into(),
+                    settings: StaticSoundSettings::default().loop_region(0.0..),
+                    slice: None,
+                };
+                AmbientHandle::Buffer(
+                    manager.play(data).map_err(|e| Error::Audio(e.to_string()))?,
+                )
+            }
+            PatchSource::Stream(def) => {
+                let data = StreamingSoundData {
+                    stream: def.instantiate(),
+                };
+                AmbientHandle::Stream(
+                    manager.play(data).map_err(|e| Error::Audio(e.to_string()))?,
+                )
+            }
         };
-        let handle = manager.play(data).map_err(|e| Error::Audio(e.to_string()))?;
         self.ambient_handles.insert(name.to_string(), handle);
         Ok(())
     }
 
-    /// Stop a specific ambient loop. No-op if it isn't playing.
+    /// Stop a specific ambient. No-op if it isn't playing.
     pub fn stop_ambient(&mut self, name: &str) {
-        if let Some(mut handle) = self.ambient_handles.remove(name) {
-            handle.stop(Tween::default());
+        if let Some(h) = self.ambient_handles.remove(name) {
+            h.stop_instant();
         }
     }
 
-    /// Stop a specific ambient loop with a fade-out tween. Drops the
-    /// handle immediately — Kira continues the fade internally and
-    /// the sound terminates itself at silence.
+    /// Stop a specific ambient with a fade-out tween. Drops the
+    /// handle immediately — the fade continues in the audio thread
+    /// (Kira for buffers, our custom Sound for streams).
     pub fn stop_ambient_with_fade(&mut self, name: &str, fade_ms: u64) {
-        if let Some(mut handle) = self.ambient_handles.remove(name) {
-            handle.stop(Tween {
-                duration: Duration::from_millis(fade_ms),
-                ..Tween::default()
-            });
+        if let Some(h) = self.ambient_handles.remove(name) {
+            h.stop_with_fade(fade_ms);
         }
     }
 
-    /// Live-coding crossfade: start the patch's *current* buffer
-    /// playing as a new ambient instance, and fade out the previous
-    /// instance for this same patch name over `fade_ms`. During the
-    /// fade both instances are audible together; for short fade
-    /// windows (~100–300 ms) the overlap is heard as a smooth
-    /// transition.
-    ///
-    /// If nothing is currently playing under this name, behaves like
-    /// `play_ambient` — starts the new instance with no fade-out.
+    /// Live-coding crossfade: start a fresh instance of the patch,
+    /// and fade out the previous instance over `fade_ms`. Works for
+    /// both buffer-based and stream-based patches.
     pub fn crossfade_ambient(&mut self, name: &str, fade_ms: u64) -> Result<()> {
-        // Stop the old one first (with fade). We drop the handle —
-        // Kira finishes the fade-out on its own.
-        if let Some(mut old) = self.ambient_handles.remove(name) {
-            old.stop(Tween {
-                duration: Duration::from_millis(fade_ms),
-                ..Tween::default()
-            });
+        if let Some(old) = self.ambient_handles.remove(name) {
+            old.stop_with_fade(fade_ms);
         }
-        // Start the new instance. It plays at full level immediately;
-        // the old one fading down gives the perceptual crossfade.
         let patch = self
             .patches
             .get(name)
             .ok_or_else(|| Error::UnknownPatch(name.into()))?
             .clone();
-        if patch.samples.is_empty() {
-            tracing::warn!(
-                "crossfade_ambient({name}): patch rendered to 0 samples — fading out only"
-            );
-            return Ok(());
-        }
         let Some(manager) = self.audio.as_mut() else {
             return Ok(());
         };
-        let frames: Vec<Frame> = patch.samples.iter().map(|s| Frame::from_mono(*s)).collect();
-        let data = StaticSoundData {
-            sample_rate: patch.sample_rate,
-            frames: frames.into(),
-            settings: StaticSoundSettings::default().loop_region(0.0..),
-            slice: None,
+        let handle = match &patch.source {
+            PatchSource::Buffer {
+                samples,
+                sample_rate,
+            } => {
+                if samples.is_empty() {
+                    tracing::warn!(
+                        "crossfade_ambient({name}): patch rendered to 0 samples — fading out only"
+                    );
+                    return Ok(());
+                }
+                let frames: Vec<Frame> =
+                    samples.iter().map(|s| Frame::from_mono(*s)).collect();
+                let data = StaticSoundData {
+                    sample_rate: *sample_rate,
+                    frames: frames.into(),
+                    settings: StaticSoundSettings::default().loop_region(0.0..),
+                    slice: None,
+                };
+                AmbientHandle::Buffer(
+                    manager.play(data).map_err(|e| Error::Audio(e.to_string()))?,
+                )
+            }
+            PatchSource::Stream(def) => {
+                let data = StreamingSoundData {
+                    stream: def.instantiate(),
+                };
+                AmbientHandle::Stream(
+                    manager.play(data).map_err(|e| Error::Audio(e.to_string()))?,
+                )
+            }
         };
-        let handle = manager.play(data).map_err(|e| Error::Audio(e.to_string()))?;
         self.ambient_handles.insert(name.to_string(), handle);
         Ok(())
     }
@@ -273,8 +349,8 @@ impl Engine {
     /// Stop every ambient loop. Called automatically at the start of
     /// each `eval` so stale loops don't outlive their patches.
     pub fn stop_all_ambient(&mut self) {
-        for (_, mut handle) in self.ambient_handles.drain() {
-            handle.stop(Tween::default());
+        for (_, handle) in self.ambient_handles.drain() {
+            handle.stop_instant();
         }
     }
 
@@ -283,17 +359,25 @@ impl Engine {
         self.ambient_handles.contains_key(name)
     }
 
-    /// Render a patch to a `Buffer` without playing it. Useful for
-    /// testing and offline rendering.
+    /// Render a patch to a `Buffer` without playing it. Returns an
+    /// error for streaming patches — they have no finite buffer.
     pub fn render(&self, name: &str) -> Result<Buffer> {
         let patch = self
             .patches
             .get(name)
             .ok_or_else(|| Error::UnknownPatch(name.into()))?;
-        Ok(Buffer {
-            sample_rate: patch.sample_rate,
-            samples: patch.samples.clone(),
-        })
+        match &patch.source {
+            PatchSource::Buffer {
+                samples,
+                sample_rate,
+            } => Ok(Buffer {
+                sample_rate: *sample_rate,
+                samples: samples.clone(),
+            }),
+            PatchSource::Stream(_) => Err(Error::Audio(format!(
+                "render('{name}'): patch is streaming-only — no finite buffer to render"
+            ))),
+        }
     }
 
     pub fn patches(&self) -> &[PatchInfo] {
@@ -370,28 +454,105 @@ fn open_audio_manager() -> Option<AudioManager<DefaultBackend>> {
 fn build_rhai_engine(state: Arc<Mutex<EvalState>>) -> rhai::Engine {
     let mut engine = rhai::Engine::new();
 
-    // Custom types: Rhai needs to know about them to allow method-call
-    // syntax (`sig.env(...)`) and array elements (`[tap(...), tap(...)]`).
-    engine.register_type_with_name::<Signal>("Signal");
+    register_unified_dsl(&mut engine);
+
+    // patch() takes a StreamDef. For one-shot patches the engine
+    // renders the stream into a finite buffer at eval time; for
+    // ambient patches the stream is stored and instantiated per
+    // play. Everything in the DSL — sine, noise, env, gain, mix,
+    // filters, taps — composes into a StreamDef. There is no
+    // separate buffer-based DSL.
+    let state_for_patch = state.clone();
+    engine.register_fn(
+        "patch",
+        move |name: ImmutableString, role: ImmutableString, def: StreamDef| -> std::result::Result<(), Box<EvalAltResult>> {
+            register_patch(&state_for_patch, name, role, PatchSource::Stream(def))
+        },
+    );
+
+    // `Dynamic` is used by Rhai internally; we don't expose it here
+    // but the import line up top is unused otherwise.
+    let _ = Dynamic::UNIT;
+
+    engine
+}
+
+fn register_patch(
+    state: &Arc<Mutex<EvalState>>,
+    name: ImmutableString,
+    role: ImmutableString,
+    source: PatchSource,
+) -> std::result::Result<(), Box<EvalAltResult>> {
+    let role = match role.as_str() {
+        "one_shot" => PatchRole::OneShot,
+        "ambient" => PatchRole::Ambient,
+        other => {
+            return Err(format!(
+                "patch: unknown role '{other}' — expected 'one_shot' or 'ambient'"
+            )
+            .into());
+        }
+    };
+    // For one-shot patches we render the stream into a finite buffer
+    // right now — Kira's low-latency `StaticSoundData` needs the
+    // samples up front, and one-shots have an end. The duration is
+    // taken from a `Take` / `Chirp` / bounded `FadeOut` in the graph,
+    // or a 10-second safety cap if the graph is unbounded.
+    let source = match (&role, source) {
+        (PatchRole::OneShot, PatchSource::Stream(def)) => {
+            const DEFAULT_CAP_S: f32 = 10.0;
+            let dur = def.finite_duration_s().unwrap_or(DEFAULT_CAP_S);
+            let max_samples = (dur * crate::signal::SAMPLE_RATE as f32) as usize;
+            let stream = def.instantiate();
+            let samples = crate::stream::render_to_buffer(stream, max_samples);
+            PatchSource::Buffer {
+                samples: samples.into(),
+                sample_rate: crate::signal::SAMPLE_RATE,
+            }
+        }
+        (_, src) => src,
+    };
+    let mut s = state.lock().expect("eval state poisoned");
+    let name_str = name.to_string();
+    if !s.patches.contains_key(&name_str) {
+        s.insertion_order.push(name_str.clone());
+    } else {
+        s.messages.push(format!("patch '{name_str}' redefined"));
+    }
+    s.patches.insert(name_str, Patch { role, source });
+    Ok(())
+}
+
+fn register_unified_dsl(engine: &mut rhai::Engine) {
+    use crate::stream::BiquadKind;
+
+    engine.register_type_with_name::<StreamDef>("Signal");
     engine.register_type_with_name::<Tap>("Tap");
 
-    // Source primitives.
-    engine.register_fn("sine", |freq_hz: f64, duration_s: f64| {
-        signal::sine(freq_hz as f32, duration_s as f32)
+    // ── Sources ───────────────────────────────────────────────
+    // sine(freq) → continuous; sine(freq, dur) → bounded via Take.
+    engine.register_fn("sine", |freq_hz: f64| StreamDef::Sine {
+        freq_hz: freq_hz as f32,
     });
-    engine.register_fn("sine", |freq_hz: i64, duration_s: f64| {
-        signal::sine(freq_hz as f32, duration_s as f32)
+    engine.register_fn("sine", |freq_hz: i64| StreamDef::Sine {
+        freq_hz: freq_hz as f32,
     });
-    engine.register_fn("sine", |freq_hz: f64, duration_s: i64| {
-        signal::sine(freq_hz as f32, duration_s as f32)
-    });
-    engine.register_fn("sine", |freq_hz: i64, duration_s: i64| {
-        signal::sine(freq_hz as f32, duration_s as f32)
-    });
+    let sine_take = |freq_hz: f32, duration_s: f32| StreamDef::Take {
+        source: Box::new(StreamDef::Sine { freq_hz }),
+        duration_s,
+    };
+    engine.register_fn("sine", move |f: f64, d: f64| sine_take(f as f32, d as f32));
+    engine.register_fn("sine", move |f: i64, d: f64| sine_take(f as f32, d as f32));
+    engine.register_fn("sine", move |f: f64, d: i64| sine_take(f as f32, d as f32));
+    engine.register_fn("sine", move |f: i64, d: i64| sine_take(f as f32, d as f32));
 
-    // Linear FM chirp. Rhai needs every numeric type combination
-    // spelled out individually; lambdas keep the boilerplate tight.
-    let chirp_fn = |start: f32, end: f32, dur: f32| signal::chirp(start, end, dur);
+    // chirp(start_hz, end_hz, dur) → bounded LFM sweep.
+    let chirp_fn =
+        |start: f32, end: f32, dur: f32| StreamDef::Chirp {
+            start_hz: start,
+            end_hz: end,
+            duration_s: dur,
+        };
     engine.register_fn("chirp", move |s: f64, e: f64, d: f64| {
         chirp_fn(s as f32, e as f32, d as f32)
     });
@@ -411,113 +572,148 @@ fn build_rhai_engine(state: Arc<Mutex<EvalState>>) -> rhai::Engine {
         chirp_fn(s as f32, e as f32, d as f32)
     });
 
+    // noise(kind) → continuous; noise(kind, dur) → bounded.
+    fn noise_def(kind: NoiseKind) -> StreamDef {
+        // Static seed — deterministic across runs of the same patch.
+        let seed_a = 0xcafef00d_d15ea5e5u64;
+        let seed_b = kind as u8 as u64 ^ 0xa02b_dbf7_bb3c_0a7;
+        StreamDef::Noise {
+            kind,
+            seed_a,
+            seed_b,
+        }
+    }
     engine.register_fn(
         "noise",
-        |kind: ImmutableString, duration_s: f64| -> std::result::Result<Signal, Box<EvalAltResult>> {
-            let k = match kind.as_str() {
-                "white" => NoiseKind::White,
-                "pink" => NoiseKind::Pink,
-                "brown" => NoiseKind::Brown,
-                other => {
-                    return Err(format!(
-                        "noise: unknown kind '{other}' — expected 'white', 'pink', or 'brown'"
-                    )
-                    .into());
-                }
-            };
-            // Noise gets a fresh PRNG seeded from a stable salt. The
-            // caller doesn't need to think about determinism — same
-            // script, same buffer.
-            let mut rng = Pcg64::new(0xcafef00d_d15ea5e5, 0xa02bdbf7bb3c0a7);
-            Ok(signal::noise(k, duration_s as f32, &mut rng))
+        |kind: ImmutableString| -> std::result::Result<StreamDef, Box<EvalAltResult>> {
+            let k = parse_noise_kind(&kind)?;
+            Ok(noise_def(k))
+        },
+    );
+    engine.register_fn(
+        "noise",
+        |kind: ImmutableString,
+         duration_s: f64|
+         -> std::result::Result<StreamDef, Box<EvalAltResult>> {
+            let k = parse_noise_kind(&kind)?;
+            Ok(StreamDef::Take {
+                source: Box::new(noise_def(k)),
+                duration_s: duration_s as f32,
+            })
         },
     );
 
-    // Transforms — registered as both standalone functions and as
-    // methods on Signal so the fluent style works.
-    engine.register_fn("env", |s: Signal, attack_s: f64, decay_s: f64| {
-        s.env(attack_s as f32, decay_s as f32)
-    });
-    engine.register_fn("gain", |s: Signal, factor: f64| s.gain(factor as f32));
-    engine.register_fn("gain", |s: Signal, factor: i64| s.gain(factor as f32));
+    // ── Transforms ───────────────────────────────────────────
+    let take = |s: StreamDef, d: f32| StreamDef::Take {
+        source: Box::new(s),
+        duration_s: d,
+    };
+    engine.register_fn("take", move |s: StreamDef, d: f64| take(s, d as f32));
+    engine.register_fn("take", move |s: StreamDef, d: i64| take(s, d as f32));
 
-    // Cosine-squared fade applied to the buffer's last `duration_s`.
-    engine.register_fn("fade_out", |s: Signal, duration_s: f64| {
-        s.fade_out(duration_s as f32)
-    });
-    engine.register_fn("fade_out", |s: Signal, duration_s: i64| {
-        s.fade_out(duration_s as f32)
-    });
+    let gain = |s: StreamDef, g: f32| StreamDef::Gain {
+        source: Box::new(s),
+        factor: g,
+    };
+    engine.register_fn("gain", move |s: StreamDef, g: f64| gain(s, g as f32));
+    engine.register_fn("gain", move |s: StreamDef, g: i64| gain(s, g as f32));
 
-    // Self-crossfade to make a buffer loop seamlessly.
-    engine.register_fn("loop_xfade", |s: Signal, crossfade_s: f64| {
-        s.loop_xfade(crossfade_s as f32)
+    let env = |s: StreamDef, a: f32, d: f32| StreamDef::Env {
+        source: Box::new(s),
+        attack_s: a,
+        decay_s: d,
+    };
+    engine.register_fn("env", move |s: StreamDef, a: f64, d: f64| {
+        env(s, a as f32, d as f32)
     });
-    engine.register_fn("loop_xfade", |s: Signal, crossfade_s: i64| {
-        s.loop_xfade(crossfade_s as f32)
+    engine.register_fn("env", move |s: StreamDef, a: i64, d: f64| {
+        env(s, a as f32, d as f32)
     });
-
-    // Tremolo: sine LFO modulating signal amplitude.
-    engine.register_fn("tremolo", |s: Signal, rate: f64, depth: f64| {
-        s.tremolo(rate as f32, depth as f32)
+    engine.register_fn("env", move |s: StreamDef, a: f64, d: i64| {
+        env(s, a as f32, d as f32)
     });
-    engine.register_fn("tremolo", |s: Signal, rate: i64, depth: f64| {
-        s.tremolo(rate as f32, depth as f32)
-    });
-    engine.register_fn("tremolo", |s: Signal, rate: f64, depth: i64| {
-        s.tremolo(rate as f32, depth as f32)
-    });
-    engine.register_fn("tremolo", |s: Signal, rate: i64, depth: i64| {
-        s.tremolo(rate as f32, depth as f32)
+    engine.register_fn("env", move |s: StreamDef, a: i64, d: i64| {
+        env(s, a as f32, d as f32)
     });
 
-    // Biquad bandpass — applies a resonant peak filter to the source.
-    // Rhai needs every numeric type combination spelled out.
-    engine.register_fn("bandpass", |s: Signal, center: f64, q: f64| {
-        s.bandpass(center as f32, q as f32)
+    let tremolo = |s: StreamDef, r: f32, depth: f32| StreamDef::Tremolo {
+        source: Box::new(s),
+        rate_hz: r,
+        depth,
+    };
+    engine.register_fn("tremolo", move |s: StreamDef, r: f64, d: f64| {
+        tremolo(s, r as f32, d as f32)
     });
-    engine.register_fn("bandpass", |s: Signal, center: i64, q: f64| {
-        s.bandpass(center as f32, q as f32)
+    engine.register_fn("tremolo", move |s: StreamDef, r: i64, d: f64| {
+        tremolo(s, r as f32, d as f32)
     });
-    engine.register_fn("bandpass", |s: Signal, center: f64, q: i64| {
-        s.bandpass(center as f32, q as f32)
+    engine.register_fn("tremolo", move |s: StreamDef, r: f64, d: i64| {
+        tremolo(s, r as f32, d as f32)
     });
-    engine.register_fn("bandpass", |s: Signal, center: i64, q: i64| {
-        s.bandpass(center as f32, q as f32)
-    });
-
-    // Biquad lowpass / highpass. q ≈ 0.707 is Butterworth (flat
-    // passband); higher q creates resonance at the cutoff knee.
-    engine.register_fn("lowpass", |s: Signal, cutoff: f64, q: f64| {
-        s.lowpass(cutoff as f32, q as f32)
-    });
-    engine.register_fn("lowpass", |s: Signal, cutoff: i64, q: f64| {
-        s.lowpass(cutoff as f32, q as f32)
-    });
-    engine.register_fn("lowpass", |s: Signal, cutoff: f64, q: i64| {
-        s.lowpass(cutoff as f32, q as f32)
-    });
-    engine.register_fn("lowpass", |s: Signal, cutoff: i64, q: i64| {
-        s.lowpass(cutoff as f32, q as f32)
+    engine.register_fn("tremolo", move |s: StreamDef, r: i64, d: i64| {
+        tremolo(s, r as f32, d as f32)
     });
 
-    engine.register_fn("highpass", |s: Signal, cutoff: f64, q: f64| {
-        s.highpass(cutoff as f32, q as f32)
+    // fade_out captures the source's finite duration at construction
+    // time so the runner knows where the fade begins.
+    let fade_out = |s: StreamDef, fade_s: f32| {
+        let bounded = s.finite_duration_s();
+        StreamDef::FadeOut {
+            source: Box::new(s),
+            fade_s,
+            bounded_to_s: bounded,
+        }
+    };
+    engine.register_fn("fade_out", move |s: StreamDef, d: f64| {
+        fade_out(s, d as f32)
     });
-    engine.register_fn("highpass", |s: Signal, cutoff: i64, q: f64| {
-        s.highpass(cutoff as f32, q as f32)
-    });
-    engine.register_fn("highpass", |s: Signal, cutoff: f64, q: i64| {
-        s.highpass(cutoff as f32, q as f32)
-    });
-    engine.register_fn("highpass", |s: Signal, cutoff: i64, q: i64| {
-        s.highpass(cutoff as f32, q as f32)
+    engine.register_fn("fade_out", move |s: StreamDef, d: i64| {
+        fade_out(s, d as f32)
     });
 
-    // Tap constructors. The two-arg form picks a sensible default
-    // decay so the tap sounds like a brief reflection; the three-arg
-    // form is explicit. `decay_k = 0` opts back into the legacy
-    // "sustained delayed copy" semantics.
+    fn biquad(source: StreamDef, kind: BiquadKind, freq_hz: f32, q: f32) -> StreamDef {
+        StreamDef::Biquad {
+            source: Box::new(source),
+            kind,
+            freq_hz,
+            q,
+        }
+    }
+    for (name, kind) in [
+        ("lowpass", BiquadKind::Lowpass),
+        ("highpass", BiquadKind::Highpass),
+        ("bandpass", BiquadKind::Bandpass),
+    ] {
+        engine.register_fn(name, move |s: StreamDef, f: f64, q: f64| {
+            biquad(s, kind, f as f32, q as f32)
+        });
+        engine.register_fn(name, move |s: StreamDef, f: i64, q: f64| {
+            biquad(s, kind, f as f32, q as f32)
+        });
+        engine.register_fn(name, move |s: StreamDef, f: f64, q: i64| {
+            biquad(s, kind, f as f32, q as f32)
+        });
+        engine.register_fn(name, move |s: StreamDef, f: i64, q: i64| {
+            biquad(s, kind, f as f32, q as f32)
+        });
+    }
+
+    // ── Mix ──────────────────────────────────────────────────
+    engine.register_fn(
+        "mix",
+        |sigs: Array| -> std::result::Result<StreamDef, Box<EvalAltResult>> {
+            let mut converted = Vec::with_capacity(sigs.len());
+            for (i, s) in sigs.into_iter().enumerate() {
+                match s.try_cast::<StreamDef>() {
+                    Some(s) => converted.push(s),
+                    None => return Err(format!("mix: element {i} is not a Signal").into()),
+                }
+            }
+            Ok(StreamDef::Mix(converted))
+        },
+    );
+
+    // ── Taps ─────────────────────────────────────────────────
     engine.register_fn("tap", |delay_s: f64, gain: f64| {
         Tap::new(delay_s as f32, gain as f32, Tap::DEFAULT_DECAY_K)
     });
@@ -527,11 +723,9 @@ fn build_rhai_engine(state: Arc<Mutex<EvalState>>) -> rhai::Engine {
     engine.register_fn("tap", |delay_s: f64, gain: f64, decay_k: i64| {
         Tap::new(delay_s as f32, gain as f32, decay_k as f32)
     });
-
-    // Reverb-tap application.
     engine.register_fn(
         "with_taps",
-        |s: Signal, taps: Array| -> std::result::Result<Signal, Box<EvalAltResult>> {
+        |s: StreamDef, taps: Array| -> std::result::Result<StreamDef, Box<EvalAltResult>> {
             let mut converted = Vec::with_capacity(taps.len());
             for (i, t) in taps.into_iter().enumerate() {
                 match t.try_cast::<Tap>() {
@@ -539,63 +733,22 @@ fn build_rhai_engine(state: Arc<Mutex<EvalState>>) -> rhai::Engine {
                     None => return Err(format!("with_taps: element {i} is not a Tap").into()),
                 }
             }
-            Ok(s.with_taps(&converted))
+            Ok(StreamDef::WithTaps {
+                source: Box::new(s),
+                taps: converted,
+            })
         },
     );
+}
 
-    // Mix takes an array of Signals and sums them.
-    engine.register_fn(
-        "mix",
-        |sigs: Array| -> std::result::Result<Signal, Box<EvalAltResult>> {
-            let mut converted = Vec::with_capacity(sigs.len());
-            for (i, s) in sigs.into_iter().enumerate() {
-                match s.try_cast::<Signal>() {
-                    Some(s) => converted.push(s),
-                    None => return Err(format!("mix: element {i} is not a Signal").into()),
-                }
-            }
-            Ok(Signal::mix(&converted))
-        },
-    );
-
-    // The patch registration entry point. Captures `state` so we can
-    // collect patches from inside the Rhai callback.
-    let state_for_patch = state.clone();
-    engine.register_fn(
-        "patch",
-        move |name: ImmutableString, role: ImmutableString, signal: Signal| -> std::result::Result<(), Box<EvalAltResult>> {
-            let role = match role.as_str() {
-                "one_shot" => PatchRole::OneShot,
-                "ambient" => PatchRole::Ambient,
-                other => {
-                    return Err(format!(
-                        "patch: unknown role '{other}' — expected 'one_shot' or 'ambient'"
-                    )
-                    .into());
-                }
-            };
-            let mut s = state_for_patch.lock().expect("eval state poisoned");
-            let name_str = name.to_string();
-            if !s.patches.contains_key(&name_str) {
-                s.insertion_order.push(name_str.clone());
-            } else {
-                s.messages.push(format!("patch '{name_str}' redefined"));
-            }
-            s.patches.insert(
-                name_str,
-                Patch {
-                    role,
-                    samples: signal.samples,
-                    sample_rate: signal.sample_rate,
-                },
-            );
-            Ok(())
-        },
-    );
-
-    // `Dynamic` is used by Rhai internally; we don't expose it here
-    // but the import line up top is unused otherwise.
-    let _ = Dynamic::UNIT;
-
-    engine
+fn parse_noise_kind(s: &str) -> std::result::Result<NoiseKind, Box<EvalAltResult>> {
+    match s {
+        "white" => Ok(NoiseKind::White),
+        "pink" => Ok(NoiseKind::Pink),
+        "brown" => Ok(NoiseKind::Brown),
+        other => Err(format!(
+            "noise: unknown kind '{other}' — expected 'white', 'pink', or 'brown'"
+        )
+        .into()),
+    }
 }

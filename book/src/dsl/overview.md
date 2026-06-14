@@ -1,70 +1,65 @@
 # DSL overview
 
 The sndlab DSL is a small set of Rhai functions for describing audio
-signals. The functions form a tiny **signal-graph DSL**: each call
-either constructs a node (`sine`, `noise`) or transforms a node
-(`gain`, `env`, `with_taps`). A patch body returns the root node and
-the engine renders it to a mono sample buffer.
+signals. Every primitive — source, transform, or combinator — builds
+a node in a single `Signal` graph. The graph is **lazy**: nothing is
+computed until the engine decides what to do with it.
+
+What the engine does depends on the patch's role:
+
+- **One-shot patches** render the graph into a finite buffer at
+  patch-registration time, driven by whatever bounded duration the
+  graph supplies (a `take(...)`, a `chirp(...)`, or a sound
+  primitive called with a duration argument). The buffer plays
+  through Kira's low-latency `StaticSoundData` path.
+- **Ambient patches** keep the graph as a lazy description. At play
+  time a fresh runner is spawned and ticks the graph at audio rate
+  for as long as the ambient stays enabled. There is no looping —
+  ambients are *generated*, not played back.
+
+The single-graph design means there's no distinction between
+"buffer DSL" and "stream DSL." `sine(440)` is the same primitive
+whether it ends up in a one-shot or an ambient — only the duration
+context differs.
 
 ## Status
 
 | Primitive | Status | Purpose |
 |---|---|---|
 | [`patch`](./patch.md) | shipped | Register a named patch. |
-| [`sine`](./sine.md) | shipped | A sine wave at a given frequency and duration. |
-| [`chirp`](./chirp.md) | shipped | Linear-FM sine sweep — broadband source for reverb-style taps. |
-| [`noise`](./noise.md) | shipped | White / pink / brown noise. |
+| [`sine`](./sine.md) | shipped | A sine oscillator. `sine(freq)` is unbounded; `sine(freq, dur)` wraps in `take`. |
+| [`chirp`](./chirp.md) | shipped | Linear-FM sweep, bounded by its `duration` argument. |
+| [`noise`](./noise.md) | shipped | `noise(kind)` is unbounded; `noise(kind, dur)` wraps in `take`. |
 | [`env`](./env.md) | shipped | Attack + exponential decay applied to a signal. |
-| [`fade_out`](./fade_out.md) | shipped | Cosine-squared fade over the buffer's last `duration_s`. |
-| [`loop_xfade`](./loop_xfade.md) | shipped | Self-crossfade for seamless ambient loops. |
+| `take` | shipped | Truncate a signal to `duration_s`. Sources support this implicitly via their two-arg form. |
+| [`fade_out`](./fade_out.md) | shipped | Cosine-squared fade over the buffer's last `duration_s`. Requires a bounded source. |
 | [`tremolo`](./tremolo.md) | shipped | Sine LFO amplitude modulation. |
 | [`gain`](./gain.md) | shipped | Linear amplitude scaling. |
-| [`bandpass`](./bandpass.md) | shipped | Biquad bandpass — carves resonant peaks from a broadband source. |
-| [`lowpass`](./lowpass.md) | shipped | Biquad lowpass — passes content below cutoff, attenuates above. |
-| [`highpass`](./highpass.md) | shipped | Biquad highpass — passes content above cutoff, attenuates below. |
+| [`bandpass`](./bandpass.md) | shipped | Biquad bandpass. |
+| [`lowpass`](./lowpass.md) | shipped | Biquad lowpass. |
+| [`highpass`](./highpass.md) | shipped | Biquad highpass. |
 | [`mix`](./mix.md) | shipped | Sum multiple signals. |
-| [`tap`](./tap.md) | shipped | A delay tap, used by `with_taps`. |
-| `with_taps` | shipped | Apply a list of reverb taps to a signal. |
+| [`tap`](./tap.md) | shipped | A delay tap, used by `with_taps`. (Per-tap exponential decay is honoured in one-shots only; ambient streams use fixed-gain delay copies.) |
 
 ## Conventions
 
-- **Frequencies** are in Hertz. Integers and floats are both accepted
-  (e.g. both `440` and `440.0`).
-- **Durations** are in seconds (`f64` in the script; cast to `f32` at
-  the buffer level).
-- **Amplitudes** are linear. `0.0` is silence, `1.0` is full scale.
-  Decibel-aware variants are a future convenience.
-- **Time-domain parameters** (attack, decay, delay) are seconds.
+- **Frequencies** in Hz. Integers and floats both accepted.
+- **Durations** in seconds.
+- **Amplitudes** linear, 0..1.
 
-## Function call style
-
-The DSL is *fluent*: signal-producing functions return a `Signal`
-value and transform functions are registered as methods on that value.
-This reads naturally:
+## Fluent style
 
 ```rhai
-sine(330.0, 3.5).env(0.008, 1.4).gain(0.32)
+sine(330.0).env(0.008, 1.4).gain(0.32).take(3.5)
 ```
 
-is equivalent to
+Equivalent to nesting calls — the engine's Rhai layer just registers
+each function as both a free fn and a method on `Signal`.
 
-```rhai
-gain(env(sine(330.0, 3.5), 0.008, 1.4), 0.32)
-```
+## Bounding rules
 
-— the former is preferred for readability. All transforms also exist
-as free functions, but you'll rarely want to use them that way.
-
-## Sample rate
-
-Synthesis runs at a fixed **48 kHz** internally. The audio backend
-(Kira via cpal) handles the conversion to the device's preferred rate.
-The script never sees samples or rates.
-
-## Determinism
-
-Same script, same buffer. `noise(...)` uses a deterministic PRNG seed
-that's stable within a build of the engine; re-evaluating a script
-produces an identical buffer. The seed is *not* unique per patch yet
-— two noise calls in the same script can correlate. See
-[noise](./noise.md) for details.
+One-shot patches need a finite duration somewhere in the graph. The
+engine walks the tree and uses the longest `take` / `chirp` /
+bounded `fade_out` it finds; if nothing's bounded it caps at a 10 s
+safety default and logs a warning. Ambient patches ignore bounded
+sub-trees and simply run forever.

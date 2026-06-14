@@ -1,18 +1,21 @@
 # `sine`
 
-A pure sine wave at a given frequency for a given duration.
+A pure sine wave at a given frequency.
 
 ## Signature
 
 ```rhai
-sine(freq_hz, duration_s) -> Signal
+sine(freq_hz)              -> Signal   // unbounded; runs forever in an ambient
+sine(freq_hz, duration_s)  -> Signal   // bounded; equivalent to sine(freq_hz).take(duration_s)
 ```
 
 Both arguments accept integers or floats. Internally everything is
 `f32` at 48 kHz; the script is free to use either numeric type.
 
 - **`freq_hz`** — frequency in Hertz.
-- **`duration_s`** — length of the resulting buffer, in seconds.
+- **`duration_s`** — optional. When supplied, the source terminates
+  after this many seconds (one-shots use this to bound their
+  rendered buffer; ambients ignore the bound and run forever).
 
 Amplitude is unit (`±1.0`). Use `.gain(...)` to scale.
 

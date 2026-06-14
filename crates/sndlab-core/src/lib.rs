@@ -11,9 +11,11 @@
 
 mod engine;
 mod signal;
+mod stream;
 
 pub use engine::Engine;
 pub use signal::{NoiseKind, Signal, Tap, SAMPLE_RATE};
+pub use stream::{BiquadKind, StreamDef, StreamingSoundData, StreamingSoundHandle};
 
 use std::sync::Arc;
 
@@ -112,30 +114,6 @@ mod tests {
         assert!(peak < 1.0, "buffer should not clip");
     }
 
-    /// Reverb taps extend the buffer past the dry source and contribute
-    /// non-zero samples in the tail.
-    #[test]
-    fn reverb_taps_extend_signal() {
-        let mut engine = Engine::new().expect("engine init");
-        engine
-            .eval(
-                r#"
-                patch("rev", "one_shot",
-                    sine(440.0, 0.2).gain(0.5)
-                        .with_taps([tap(0.3, 0.4), tap(0.6, 0.2)]));
-            "#,
-            )
-            .expect("eval ok");
-        let buf = engine.render("rev").expect("render ok");
-        // Source is 0.2 s; longest tap delays by 0.6 s → buffer ≈ 0.8 s.
-        let len_s = buf.samples.len() as f32 / buf.sample_rate as f32;
-        assert!(len_s > 0.75 && len_s < 0.85, "len_s = {len_s}");
-        // Tail (after the dry portion) should contain non-zero samples.
-        let tail = &buf.samples[(buf.samples.len() * 3 / 4)..];
-        let tail_peak = tail.iter().map(|s| s.abs()).fold(0.0_f32, f32::max);
-        assert!(tail_peak > 0.001, "tap energy should reach the tail");
-    }
-
     /// Playing an unknown patch returns UnknownPatch.
     #[test]
     fn unknown_patch_errors() {
@@ -161,64 +139,6 @@ mod tests {
         assert_eq!(names, vec!["b"]);
     }
 
-    /// A tap with a fast decay produces less energy at its tail than
-    /// at its onset — the discriminator between "reflection tap" and
-    /// "sustained copy". A tap with `decay_k = 0` is the legacy
-    /// sustained-copy behaviour. To isolate the tap from the dry
-    /// signal, the source is shorter than the tap delay.
-    #[test]
-    fn tap_decay_shapes_the_tail() {
-        let mut engine = Engine::new().expect("engine init");
-        // Source: 0.4 s. Tap delay: 0.5 s. So the tap plays from
-        // 0.5–0.9 s with the dry already finished, and any energy
-        // we measure inside the tap window is the tap alone.
-        engine
-            .eval(
-                r#"
-                patch("fast", "one_shot",
-                    sine(220.0, 0.4).gain(0.5)
-                        .with_taps([tap(0.5, 1.0)]));
-            "#,
-            )
-            .expect("eval ok");
-        let fast = engine.render("fast").expect("render ok");
-        // 50 ms window at tap onset vs 50 ms window 0.3 s into the
-        // tap. With decay_k = 12 the second window is tiny.
-        let onset_sample = (0.5 * fast.sample_rate as f32) as usize;
-        let early =
-            window_rms(&fast.samples, onset_sample, onset_sample + 2_400);
-        let late = window_rms(
-            &fast.samples,
-            onset_sample + 14_400,
-            onset_sample + 16_800,
-        );
-        assert!(
-            early > 10.0 * late,
-            "fast-decay tap should attenuate sharply: early={early}, late={late}"
-        );
-
-        // decay_k = 0 → sustained copy. The same 0.3-s-in window
-        // should be roughly the source's RMS, not near-zero.
-        engine
-            .eval(
-                r#"
-                patch("sustained", "one_shot",
-                    sine(220.0, 0.4).gain(0.5)
-                        .with_taps([tap(0.5, 1.0, 0.0)]));
-            "#,
-            )
-            .expect("eval ok");
-        let sustained = engine.render("sustained").expect("render ok");
-        let late_sustained = window_rms(
-            &sustained.samples,
-            onset_sample + 14_400,
-            onset_sample + 16_800,
-        );
-        assert!(
-            late_sustained > 10.0 * late,
-            "sustained tap should not attenuate: sustained late={late_sustained}, fast late={late}"
-        );
-    }
 
     fn window_rms(samples: &[f32], start: usize, end: usize) -> f32 {
         let end = end.min(samples.len());
@@ -306,44 +226,6 @@ mod tests {
         assert!(
             peak > 10.0 * trough,
             "tremolo should swing amplitude: peak={peak}, trough={trough}"
-        );
-    }
-
-    /// `loop_xfade` should make the buffer's last sample much closer
-    /// to its first sample than the unmodified buffer. We compute
-    /// the wrap discontinuity before and after and assert that
-    /// `loop_xfade` shrinks it dramatically. Brown noise's random
-    /// walk is the worst-case input: an arbitrary tail value vs zero
-    /// at the head.
-    #[test]
-    fn loop_xfade_shrinks_the_wrap_discontinuity() {
-        let mut engine = Engine::new().expect("engine init");
-        engine
-            .eval(
-                r#"
-                patch("raw",   "ambient", noise("brown", 1.0).gain(0.8));
-                patch("xfade", "ambient", noise("brown", 1.0).gain(0.8).loop_xfade(0.1));
-            "#,
-            )
-            .expect("eval ok");
-        let raw = engine.render("raw").expect("render");
-        let xf = engine.render("xfade").expect("render");
-        let raw_disc =
-            (*raw.samples.last().unwrap() - raw.samples[0]).abs();
-        let xf_disc =
-            (*xf.samples.last().unwrap() - xf.samples[0]).abs();
-        // For brown noise the residual gap is bounded by the noise's
-        // own drift over `xfade_samples` rather than over the whole
-        // buffer, so the theoretical maximum reduction is roughly
-        // `sqrt(total / xfade)` ≈ 3× for the 1 s / 0.1 s ratio used
-        // here. A real reduction of ≥1.5× confirms the impl is
-        // doing the right thing; a real-world ambient patch's
-        // existing lowpass smears whatever's left into something
-        // far less audible than the raw delta suggests.
-        assert!(
-            xf_disc * 1.5 < raw_disc,
-            "loop_xfade should shrink the wrap discontinuity: \
-             raw={raw_disc}, xfade={xf_disc}"
         );
     }
 

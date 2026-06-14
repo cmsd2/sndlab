@@ -31,6 +31,24 @@ them in your game.
   right.
 - **Not a music-theory tool.** No notes, no scales, no chord progressions.
 
+## How patches play
+
+Every primitive in the DSL builds a node in a lazy `Signal` graph.
+What happens to that graph depends on the patch's role:
+
+- **One-shot patches** (a ping, a hit, a UI click) get *rendered* to a
+  finite buffer at eval time, driven by whatever `take` / `chirp` /
+  `fade_out` duration the graph specifies. The buffer plays through
+  Kira's low-latency one-shot path.
+- **Ambient patches** (ocean rumble, machinery hum) are *generated*:
+  a fresh runner ticks the graph at audio rate for as long as the
+  ambient stays enabled. There's no buffer and no loop — the graph
+  just runs.
+
+The DSL is the same either way. `sine(440)` is `sine(440)` whether
+it ends up in a one-shot or an ambient — only the duration context
+differs.
+
 ## How it's built
 
 Two crates:

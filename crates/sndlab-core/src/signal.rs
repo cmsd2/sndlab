@@ -294,7 +294,7 @@ impl Signal {
 /// is a literal delayed copy of the source (the old behaviour, useful
 /// for stacking sustained chord-like tones). Positive values shape the
 /// tap into a brief reflection.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Tap {
     pub delay_s: f32,
     pub gain: f32,
@@ -439,7 +439,7 @@ pub fn chirp(start_hz: f32, end_hz: f32, duration_s: f32) -> Signal {
 /// What kind of noise to generate. Pink and brown are derived from
 /// white via simple integrators; not exactly textbook-pink but close
 /// enough for game ambience.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum NoiseKind {
     White,
     Pink,

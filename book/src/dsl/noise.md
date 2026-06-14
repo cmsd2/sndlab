@@ -5,7 +5,8 @@ A noise generator. Three flavours.
 ## Signature
 
 ```rhai
-noise(kind: string, duration_s) -> Signal
+noise(kind: string)               -> Signal   // unbounded; runs forever in an ambient
+noise(kind: string, duration_s)   -> Signal   // bounded
 ```
 
 - **`kind`** — one of:

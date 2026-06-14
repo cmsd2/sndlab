@@ -67,8 +67,10 @@ and quieter, each itself brief (default 80 ms decay).
 
 ## Notes
 
-- **Older patches** that relied on sustained-copy taps (the only behaviour
-  before this change) need to add `, 0` to their `tap(...)` calls to keep
-  sounding the same.
 - **Combining decays**: a single signal can have many taps with different
   `decay_k` values — short close reflections plus a long diffused tail.
+- **Streaming caveat:** in *ambient* patches the runtime delay-line uses
+  a fixed per-tap gain (the `decay_k` field is ignored). The full
+  exponential-decay shaping only applies in one-shot patches where the
+  taps are baked into a finite buffer at eval time. Adding per-tap onset
+  envelopes to the streaming delay line is a future change.

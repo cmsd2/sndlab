@@ -71,19 +71,19 @@ consumer; an embedded game audio engine is another (see
 | Primitive | Status | Sketch |
 |---|---|---|
 | `patch(name, role, signal)` | shipped | Register a named patch |
-| `sine(freq_hz, dur_s)` | shipped | Sine oscillator |
+| `sine(freq_hz)` / `sine(freq_hz, dur_s)` | shipped | Sine oscillator. Unbounded or bounded. |
 | `chirp(start_hz, end_hz, dur_s)` | shipped | Linear-FM sine sweep |
-| `noise(kind, dur_s)` | shipped | Noise generator (white/pink/brown) |
+| `noise(kind)` / `noise(kind, dur_s)` | shipped | Noise generator (white/pink/brown). Unbounded or bounded. |
+| `signal.take(duration_s)` | shipped | Truncate a signal to a fixed duration |
 | `signal.env(attack_s, decay_s)` | shipped | Attack + exp decay envelope |
 | `signal.fade_out(duration_s)` | shipped | Cosine-squared tail fade |
-| `signal.loop_xfade(crossfade_s)` | shipped | Self-crossfade for seamless ambient loops |
 | `signal.tremolo(rate_hz, depth)` | shipped | Sine-LFO amplitude modulation |
 | `signal.gain(linear)` | shipped | Linear amplitude scaling |
 | `signal.bandpass(center_hz, q)` | shipped | Biquad resonant bandpass filter |
 | `signal.lowpass(cutoff_hz, q)` | shipped | Biquad lowpass (cuts above cutoff) |
 | `signal.highpass(cutoff_hz, q)` | shipped | Biquad highpass (cuts below cutoff) |
 | `mix([sig, ...])` | shipped | Sum signals |
-| `tap(delay_s, gain[, decay_k])` + `signal.with_taps([...])` | shipped | Discrete reflection-style reverb (per-tap decay) |
+| `tap(delay_s, gain[, decay_k])` + `signal.with_taps([...])` | shipped | Discrete delay-tap reverb |
 
 `Status` flips to `shipped` as primitives land. Whenever a row flips,
 the [DSL overview](./book/src/dsl/overview.md) status table and the
