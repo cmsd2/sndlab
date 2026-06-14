@@ -16,6 +16,7 @@ the engine renders it to a mono sample buffer.
 | [`noise`](./noise.md) | shipped | White / pink / brown noise. |
 | [`env`](./env.md) | shipped | Attack + exponential decay applied to a signal. |
 | [`fade_out`](./fade_out.md) | shipped | Cosine-squared fade over the buffer's last `duration_s`. |
+| [`loop_xfade`](./loop_xfade.md) | shipped | Self-crossfade for seamless ambient loops. |
 | [`tremolo`](./tremolo.md) | shipped | Sine LFO amplitude modulation. |
 | [`gain`](./gain.md) | shipped | Linear amplitude scaling. |
 | [`bandpass`](./bandpass.md) | shipped | Biquad bandpass — carves resonant peaks from a broadband source. |

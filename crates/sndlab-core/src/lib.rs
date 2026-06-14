@@ -309,6 +309,44 @@ mod tests {
         );
     }
 
+    /// `loop_xfade` should make the buffer's last sample much closer
+    /// to its first sample than the unmodified buffer. We compute
+    /// the wrap discontinuity before and after and assert that
+    /// `loop_xfade` shrinks it dramatically. Brown noise's random
+    /// walk is the worst-case input: an arbitrary tail value vs zero
+    /// at the head.
+    #[test]
+    fn loop_xfade_shrinks_the_wrap_discontinuity() {
+        let mut engine = Engine::new().expect("engine init");
+        engine
+            .eval(
+                r#"
+                patch("raw",   "ambient", noise("brown", 1.0).gain(0.8));
+                patch("xfade", "ambient", noise("brown", 1.0).gain(0.8).loop_xfade(0.1));
+            "#,
+            )
+            .expect("eval ok");
+        let raw = engine.render("raw").expect("render");
+        let xf = engine.render("xfade").expect("render");
+        let raw_disc =
+            (*raw.samples.last().unwrap() - raw.samples[0]).abs();
+        let xf_disc =
+            (*xf.samples.last().unwrap() - xf.samples[0]).abs();
+        // For brown noise the residual gap is bounded by the noise's
+        // own drift over `xfade_samples` rather than over the whole
+        // buffer, so the theoretical maximum reduction is roughly
+        // `sqrt(total / xfade)` ≈ 3× for the 1 s / 0.1 s ratio used
+        // here. A real reduction of ≥1.5× confirms the impl is
+        // doing the right thing; a real-world ambient patch's
+        // existing lowpass smears whatever's left into something
+        // far less audible than the raw delta suggests.
+        assert!(
+            xf_disc * 1.5 < raw_disc,
+            "loop_xfade should shrink the wrap discontinuity: \
+             raw={raw_disc}, xfade={xf_disc}"
+        );
+    }
+
     /// fade_out leaves the body of the buffer unchanged and brings
     /// the last region smoothly down to zero. The very last sample
     /// must be at or below the noise floor of the cosine ramp.

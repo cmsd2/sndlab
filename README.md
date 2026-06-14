@@ -76,6 +76,7 @@ consumer; an embedded game audio engine is another (see
 | `noise(kind, dur_s)` | shipped | Noise generator (white/pink/brown) |
 | `signal.env(attack_s, decay_s)` | shipped | Attack + exp decay envelope |
 | `signal.fade_out(duration_s)` | shipped | Cosine-squared tail fade |
+| `signal.loop_xfade(crossfade_s)` | shipped | Self-crossfade for seamless ambient loops |
 | `signal.tremolo(rate_hz, depth)` | shipped | Sine-LFO amplitude modulation |
 | `signal.gain(linear)` | shipped | Linear amplitude scaling |
 | `signal.bandpass(center_hz, q)` | shipped | Biquad resonant bandpass filter |

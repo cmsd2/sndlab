@@ -24,6 +24,7 @@
 - [`noise`](./dsl/noise.md)
 - [`env`](./dsl/env.md)
 - [`fade_out`](./dsl/fade_out.md)
+- [`loop_xfade`](./dsl/loop_xfade.md)
 - [`tremolo`](./dsl/tremolo.md)
 - [`gain`](./dsl/gain.md)
 - [`bandpass`](./dsl/bandpass.md)

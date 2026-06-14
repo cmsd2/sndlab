@@ -111,6 +111,47 @@ impl Signal {
         Signal::new(apply_biquad(&self.samples, b0, b1, b2, a0, a1, a2))
     }
 
+    /// Bake a self-crossfade into the last `crossfade_s` of the
+    /// buffer to make it loop seamlessly. The crossfade blends the
+    /// tail toward the head with a cosine-squared shape so the
+    /// final sample is approximately the head's `crossfade_s`-th
+    /// sample (not the original last sample). When Kira wraps the
+    /// loop, the jump from the end back to position 0 is then a
+    /// small step within the head's first `crossfade_s` of content
+    /// rather than the wild discontinuity between an arbitrary tail
+    /// value and the start.
+    ///
+    /// Essential for ambient noise-based buffers. Pure sines whose
+    /// frequencies are integer multiples of `1/duration` already
+    /// loop seamlessly; noise sources don't, and `loop_xfade` is
+    /// the standard sampler technique for fixing them. Typical
+    /// crossfade_s is 0.1 to 0.5 seconds.
+    pub fn loop_xfade(&self, crossfade_s: f32) -> Signal {
+        let n = self.samples.len();
+        if n == 0 || crossfade_s <= 0.0 {
+            return self.clone();
+        }
+        // Cap the crossfade at half the buffer length so the regions
+        // don't overlap.
+        let xfade = ((crossfade_s * SAMPLE_RATE_F) as usize)
+            .min(n / 2)
+            .max(1);
+        let mut out: Vec<f32> = self.samples.iter().copied().collect();
+        let inv_xfade = 1.0 / xfade as f32;
+        for i in 0..xfade {
+            let tail_idx = n - xfade + i;
+            let head_idx = i;
+            // Cosine-squared curve so the crossfade is smooth at both
+            // its start (no kink where the original tail begins to
+            // morph) and its end (no kink at the loop boundary).
+            let x = i as f32 * inv_xfade;
+            let c = (std::f32::consts::FRAC_PI_2 * x).sin();
+            let t = c * c;
+            out[tail_idx] = (1.0 - t) * self.samples[tail_idx] + t * self.samples[head_idx];
+        }
+        Signal::new(out)
+    }
+
     /// Tremolo — amplitude modulation by a low-frequency sine. The
     /// modulator runs `cos(2π·rate_hz·t)`, scaled so that `depth = 0`
     /// is a no-op and `depth = 1` swings the amplitude between 0 and

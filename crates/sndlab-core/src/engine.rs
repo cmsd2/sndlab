@@ -371,6 +371,14 @@ fn build_rhai_engine(state: Arc<Mutex<EvalState>>) -> rhai::Engine {
         s.fade_out(duration_s as f32)
     });
 
+    // Self-crossfade to make a buffer loop seamlessly.
+    engine.register_fn("loop_xfade", |s: Signal, crossfade_s: f64| {
+        s.loop_xfade(crossfade_s as f32)
+    });
+    engine.register_fn("loop_xfade", |s: Signal, crossfade_s: i64| {
+        s.loop_xfade(crossfade_s as f32)
+    });
+
     // Tremolo: sine LFO modulating signal amplitude.
     engine.register_fn("tremolo", |s: Signal, rate: f64, depth: f64| {
         s.tremolo(rate as f32, depth as f32)
