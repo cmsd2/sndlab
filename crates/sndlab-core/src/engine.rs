@@ -520,7 +520,26 @@ fn register_patch(
     let source = match (&role, source) {
         (PatchRole::OneShot, PatchSource::Stream(def)) => {
             const DEFAULT_CAP_S: f32 = 10.0;
+            // Hard cap on rendered one-shot duration. Anything longer
+            // than this is overwhelmingly likely to be a live-coding
+            // typo (`.speed(0.001)` etc.) that would otherwise OOM the
+            // process trying to allocate a multi-gigabyte buffer.
+            // 10 minutes is well above any genuine sound-design one-
+            // shot — raise it if your patch legitimately needs more.
+            const HARD_MAX_S: f32 = 600.0;
             let dur = def.finite_duration_s().unwrap_or(DEFAULT_CAP_S);
+            if !dur.is_finite() || dur > HARD_MAX_S {
+                return Err(format!(
+                    "patch '{}' would render to {:.0} s, exceeding the {:.0} s \
+                     one-shot cap. Check your `.pitch`/`.speed`/duration values — \
+                     a tiny argument (e.g. `.speed(0.001)`) explodes the rendered \
+                     length. Make this an ambient patch if you need it unbounded.",
+                    name.as_str(),
+                    dur,
+                    HARD_MAX_S
+                )
+                .into());
+            }
             let max_samples = (dur * crate::signal::SAMPLE_RATE as f32) as usize;
             let stream = def.instantiate();
             let samples = crate::stream::render_to_buffer(stream, max_samples);
@@ -800,6 +819,31 @@ fn register_unified_dsl(engine: &mut rhai::Engine) {
     });
     engine.register_fn("fade_out", move |s: StreamDef, d: i64| {
         fade_out(s, d as f32)
+    });
+
+    // fade_in(seconds): sin² ramp up over the first `fade_s`, then
+    // pass through. Complementary to fade_out's cos².
+    let fade_in = |s: StreamDef, fade_s: f32| StreamDef::FadeIn {
+        source: Box::new(s),
+        fade_s,
+    };
+    engine.register_fn("fade_in", move |s: StreamDef, d: f64| {
+        fade_in(s, d as f32)
+    });
+    engine.register_fn("fade_in", move |s: StreamDef, d: i64| {
+        fade_in(s, d as f32)
+    });
+
+    // delay(seconds): prepend silence before the source.
+    let delay = |s: StreamDef, delay_s: f32| StreamDef::Delay {
+        source: Box::new(s),
+        delay_s,
+    };
+    engine.register_fn("delay", move |s: StreamDef, d: f64| {
+        delay(s, d as f32)
+    });
+    engine.register_fn("delay", move |s: StreamDef, d: i64| {
+        delay(s, d as f32)
     });
 
     fn biquad(source: StreamDef, kind: BiquadKind, freq_hz: f32, q: f32) -> StreamDef {

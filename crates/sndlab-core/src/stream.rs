@@ -97,6 +97,21 @@ pub enum StreamDef {
         /// inspecting the graph.
         bounded_to_s: Option<f32>,
     },
+    /// sin² fade-in applied to the source's first `fade_s`.
+    /// Complementary to `FadeOut`'s cos² — sin² + cos² = 1, so a
+    /// fade_in / fade_out pair across two layers reconstructs to
+    /// constant power. Works on bounded or unbounded sources.
+    FadeIn {
+        source: Box<StreamDef>,
+        fade_s: f32,
+    },
+    /// Prepend `delay_s` of silence before the source starts.
+    /// Useful for staggering elements in a mix without baking
+    /// silence into the source.
+    Delay {
+        source: Box<StreamDef>,
+        delay_s: f32,
+    },
     /// Real-time delay-tap reverb. Each tap is a delayed, gain-and-
     /// decay-shaped copy of the source's most recent samples,
     /// summed back into the output.
@@ -204,6 +219,12 @@ impl StreamDef {
                 *fade_s,
                 *bounded_to_s,
             )),
+            Self::FadeIn { source, fade_s } => {
+                Box::new(FadeInRunner::new(source.instantiate(), *fade_s))
+            }
+            Self::Delay { source, delay_s } => {
+                Box::new(DelayRunner::new(source.instantiate(), *delay_s))
+            }
             Self::WithTaps { source, taps } => Box::new(WithTapsRunner::new(
                 source.instantiate(),
                 taps.clone(),
@@ -256,7 +277,11 @@ impl StreamDef {
             | Self::Env { source, .. }
             | Self::Tremolo { source, .. }
             | Self::FadeOut { source, .. }
+            | Self::FadeIn { source, .. }
             | Self::WithTaps { source, .. } => source.finite_duration_s(),
+            Self::Delay { source, delay_s } => {
+                source.finite_duration_s().map(|d| d + delay_s.max(0.0))
+            }
             Self::Mix(parts) => parts.iter().filter_map(|p| p.finite_duration_s()).fold(
                 None,
                 |acc, d| match acc {
@@ -687,6 +712,62 @@ impl Stream for FadeOutRunner {
     }
 }
 
+struct FadeInRunner {
+    source: Box<dyn Stream + Send>,
+    fade_samples: u64,
+    samples_elapsed: u64,
+}
+
+impl FadeInRunner {
+    fn new(source: Box<dyn Stream + Send>, fade_s: f32) -> Self {
+        Self {
+            source,
+            fade_samples: (fade_s.max(0.0) * SAMPLE_RATE as f32) as u64,
+            samples_elapsed: 0,
+        }
+    }
+}
+
+impl Stream for FadeInRunner {
+    fn tick(&mut self) -> Option<f32> {
+        let x = self.source.tick()?;
+        if self.fade_samples == 0 || self.samples_elapsed >= self.fade_samples {
+            return Some(x);
+        }
+        let t = self.samples_elapsed as f32 / self.fade_samples as f32;
+        // sin² over [0, 1] — complementary to fade_out's cos² so the
+        // two energy-sum to a constant.
+        let s = (std::f32::consts::FRAC_PI_2 * t).sin();
+        let env = s * s;
+        self.samples_elapsed += 1;
+        Some(x * env)
+    }
+}
+
+struct DelayRunner {
+    source: Box<dyn Stream + Send>,
+    silence_samples_remaining: u64,
+}
+
+impl DelayRunner {
+    fn new(source: Box<dyn Stream + Send>, delay_s: f32) -> Self {
+        Self {
+            source,
+            silence_samples_remaining: (delay_s.max(0.0) * SAMPLE_RATE as f32) as u64,
+        }
+    }
+}
+
+impl Stream for DelayRunner {
+    fn tick(&mut self) -> Option<f32> {
+        if self.silence_samples_remaining > 0 {
+            self.silence_samples_remaining -= 1;
+            return Some(0.0);
+        }
+        self.source.tick()
+    }
+}
+
 struct WithTapsRunner {
     source: Box<dyn Stream + Send>,
     taps: Vec<TapState>,
@@ -954,10 +1035,13 @@ impl SampleRunner {
         let grain_len_samples =
             (Self::GRAIN_LEN_MS * 1e-3 * SAMPLE_RATE as f64) as u64;
         let grain_hop_samples = (grain_len_samples / Self::OVERLAP_FACTOR).max(1);
-        // Each new grain's origin moves forward by hop_out output samples
-        // worth of source time, divided by the stretch factor. Slower
-        // stretch (0.5) → origins move more slowly → playback elongates.
-        let grain_origin_advance_src = (grain_hop_samples as f64) * src_per_out / stretch;
+        // Each new grain's origin moves forward by hop_out output
+        // samples worth of source time, MULTIPLIED by the stretch
+        // factor. With stretch < 1 (slower playback / longer
+        // duration), the origin advances more slowly, so the source
+        // is consumed more slowly — output duration = source /
+        // stretch, matching what `finite_duration_s` reports.
+        let grain_origin_advance_src = (grain_hop_samples as f64) * src_per_out * stretch;
 
         Self {
             samples,

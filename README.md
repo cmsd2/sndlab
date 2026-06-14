@@ -77,6 +77,8 @@ consumer; an embedded game audio engine is another (see
 | `signal.take(duration_s)` | shipped | Truncate a signal to a fixed duration |
 | `signal.env(attack_s, decay_s)` | shipped | Attack + exp decay envelope |
 | `signal.fade_out(duration_s)` | shipped | Cosine-squared tail fade |
+| `signal.fade_in(duration_s)` | shipped | sin² fade-up at the start; constant-power complement to fade_out |
+| `signal.delay(duration_s)` | shipped | Prepend silence; stagger layers in a mix |
 | `signal.tremolo(rate_hz, depth)` | shipped | Sine-LFO amplitude modulation |
 | `signal.gain(linear)` | shipped | Linear amplitude scaling |
 | `signal.bandpass(center_hz, q)` | shipped | Biquad resonant bandpass filter |

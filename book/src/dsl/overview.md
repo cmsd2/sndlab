@@ -33,6 +33,8 @@ context differs.
 | [`env`](./env.md) | shipped | Attack + exponential decay applied to a signal. |
 | `take` | shipped | Truncate a signal to `duration_s`. Sources support this implicitly via their two-arg form. |
 | [`fade_out`](./fade_out.md) | shipped | Cosine-squared fade over the buffer's last `duration_s`. Requires a bounded source. |
+| [`fade_in`](./fade_in.md) | shipped | sin² fade-up at the start. Complementary to `fade_out` — together they sum to constant power. |
+| [`delay`](./delay.md) | shipped | Prepend silence before the source. Stagger entries in a `mix(…)`. |
 | [`tremolo`](./tremolo.md) | shipped | Sine LFO amplitude modulation. |
 | [`gain`](./gain.md) | shipped | Linear amplitude scaling. |
 | [`bandpass`](./bandpass.md) | shipped | Biquad bandpass. |
