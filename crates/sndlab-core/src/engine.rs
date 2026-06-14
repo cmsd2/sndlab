@@ -174,6 +174,21 @@ impl Engine {
         }
     }
 
+    /// Set the cutoff of a Q=0.707 biquad lowpass applied to a
+    /// streaming ambient handle. Pass a very large value (≥ 20 000
+    /// Hz) to disable. Used by the host to model distance-dependent
+    /// high-frequency absorption: far targets sound muffled rather
+    /// than just quieter. No-op on buffer-based ambients — we don't
+    /// have a streaming-equivalent filter slot in the static path.
+    pub fn set_ambient_lowpass(&mut self, name: &str, cutoff_hz: f32) {
+        let Some(handle) = self.ambient_handles.get_mut(name) else {
+            return;
+        };
+        if let AmbientHandle::Stream(h) = handle {
+            h.set_lowpass(cutoff_hz);
+        }
+    }
+
     /// Set the directory relative paths in `sample("…")` resolve
     /// against. Pass `None` to require absolute paths. Takes effect on
     /// the next `eval`.

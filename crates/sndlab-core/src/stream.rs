@@ -1178,6 +1178,11 @@ impl SampleRunner {
 /// engine uses it to stop the stream when the ambient is toggled
 /// off or crossfaded out. Cloneable so we can store one copy in
 /// the handle table and use another to issue stop commands.
+/// Sentinel: cutoff at or above this disables the per-handle
+/// lowpass. Picked to be safely above audible content even at lower
+/// engine sample rates.
+const LOWPASS_BYPASS_HZ: f32 = 20_000.0;
+
 #[derive(Clone)]
 pub struct StreamingSoundHandle {
     stop: Arc<AtomicBool>,
@@ -1188,6 +1193,12 @@ pub struct StreamingSoundHandle {
     /// wants to drive volume from game state (distance attenuation,
     /// depth muffling) can just call `set_volume` every frame.
     volume_bits: Arc<std::sync::atomic::AtomicU32>,
+    /// f32-bits-as-u32 cutoff frequency for a Q=0.707 biquad lowpass
+    /// applied to the streamed output. Set to `LOWPASS_BYPASS_HZ` or
+    /// higher (the default) to disable. Lets a host model
+    /// distance-dependent high-frequency absorption — far targets
+    /// sound muffled rather than just quieter.
+    lowpass_hz_bits: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl StreamingSoundHandle {
@@ -1202,6 +1213,16 @@ impl StreamingSoundHandle {
     pub fn set_volume(&self, linear: f32) {
         let clamped = linear.max(0.0).min(4.0);
         self.volume_bits
+            .store(clamped.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Set the cutoff (in Hz) of a Q=0.707 biquad lowpass applied
+    /// to the streamed output. Pass `LOWPASS_BYPASS_HZ` or higher
+    /// (the default 20 kHz) to disable the filter. Below ~20 Hz the
+    /// value is clamped to avoid degenerate coefficients.
+    pub fn set_lowpass(&self, cutoff_hz: f32) {
+        let clamped = cutoff_hz.max(20.0);
+        self.lowpass_hz_bits
             .store(clamped.to_bits(), Ordering::Relaxed);
     }
 }
@@ -1220,11 +1241,23 @@ impl SoundData for StreamingSoundData {
         let stop = Arc::new(AtomicBool::new(false));
         let fade_out_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let volume_bits = Arc::new(std::sync::atomic::AtomicU32::new(1.0_f32.to_bits()));
+        let lowpass_hz_bits = Arc::new(std::sync::atomic::AtomicU32::new(
+            LOWPASS_BYPASS_HZ.to_bits(),
+        ));
         let sound = StreamingSound {
             stream: self.stream,
             stop: stop.clone(),
             fade_out_ms: fade_out_ms.clone(),
             volume_bits: volume_bits.clone(),
+            lowpass_hz_bits: lowpass_hz_bits.clone(),
+            // Sentinel: any real cutoff ≥ 20 Hz differs from this by
+            // more than the recompute threshold, so the first active
+            // buffer always builds fresh coefficients. NaN was a foot-
+            // gun — `(x - NaN).abs() > 0.1` is always false, so the
+            // biquad sat at all-zero default coefficients and muted
+            // every sample.
+            current_cutoff_hz: -1.0,
+            lp: BiquadState::default(),
             fade_state: FadeState::Steady,
             fade_samples_remaining: 0,
             fade_total_samples: 0,
@@ -1235,6 +1268,7 @@ impl SoundData for StreamingSoundData {
                 stop,
                 fade_out_ms,
                 volume_bits,
+                lowpass_hz_bits,
             },
         ))
     }
@@ -1255,9 +1289,67 @@ struct StreamingSound {
     /// rate (~60 Hz) and we read it ~250 Hz (Kira's default buffer
     /// rate), so smoothness is dominated by Kira's internal mixer.
     volume_bits: Arc<std::sync::atomic::AtomicU32>,
+    /// Lowpass cutoff in Hz. Read once per buffer; re-computes biquad
+    /// coefficients only when the value has actually changed since
+    /// the last buffer. NaN initial value forces a coefficient compute
+    /// on the first buffer.
+    lowpass_hz_bits: Arc<std::sync::atomic::AtomicU32>,
+    /// Cached cutoff used to skip coefficient compute when the
+    /// host hasn't changed it. Compared against the atomic each
+    /// buffer; differ by > 0.1 Hz triggers a re-compute.
+    current_cutoff_hz: f32,
+    lp: BiquadState,
     fade_state: FadeState,
     fade_samples_remaining: u32,
     fade_total_samples: u32,
+}
+
+/// One-pole-equivalent biquad lowpass state + coeffs. Q is fixed at
+/// 0.707 (critically damped, no resonant peak), which is what you
+/// want for "muffle distant sound" — anything resonant would call
+/// attention to itself.
+#[derive(Default, Clone, Copy)]
+struct BiquadState {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+    x1: f32,
+    x2: f32,
+    y1: f32,
+    y2: f32,
+}
+
+impl BiquadState {
+    fn set_lowpass(&mut self, cutoff_hz: f32, sample_rate: u32) {
+        let nyquist = sample_rate as f32 * 0.5;
+        let f = cutoff_hz.clamp(20.0, nyquist * 0.95);
+        let w0 = TWO_PI * f / sample_rate as f32;
+        let cos_w0 = w0.cos();
+        let sin_w0 = w0.sin();
+        let q = std::f32::consts::FRAC_1_SQRT_2; // 0.707
+        let alpha = sin_w0 / (2.0 * q);
+        let a0 = 1.0 + alpha;
+        let inv_a0 = 1.0 / a0;
+        let one_minus_cos = 1.0 - cos_w0;
+        self.b0 = (one_minus_cos * 0.5) * inv_a0;
+        self.b1 = one_minus_cos * inv_a0;
+        self.b2 = (one_minus_cos * 0.5) * inv_a0;
+        self.a1 = (-2.0 * cos_w0) * inv_a0;
+        self.a2 = (1.0 - alpha) * inv_a0;
+    }
+
+    fn tick(&mut self, x0: f32) -> f32 {
+        let y0 = self.b0 * x0 + self.b1 * self.x1 + self.b2 * self.x2
+            - self.a1 * self.y1
+            - self.a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = x0;
+        self.y2 = self.y1;
+        self.y1 = y0;
+        y0
+    }
 }
 
 impl Sound for StreamingSound {
@@ -1283,6 +1375,15 @@ impl Sound for StreamingSound {
         // buffer read picks up changes well within a tween-able
         // window.
         let volume = f32::from_bits(self.volume_bits.load(Ordering::Relaxed));
+        let cutoff_hz = f32::from_bits(self.lowpass_hz_bits.load(Ordering::Relaxed));
+        let lp_active = cutoff_hz < LOWPASS_BYPASS_HZ;
+        // Recompute biquad coefficients only when the host has
+        // actually moved the cutoff. NaN initial state guarantees
+        // the first active buffer computes coeffs.
+        if lp_active && (cutoff_hz - self.current_cutoff_hz).abs() > 0.1 {
+            self.lp.set_lowpass(cutoff_hz, SAMPLE_RATE);
+            self.current_cutoff_hz = cutoff_hz;
+        }
 
         for f in out.iter_mut() {
             match self.fade_state {
@@ -1290,7 +1391,10 @@ impl Sound for StreamingSound {
                     *f = Frame::ZERO;
                 }
                 FadeState::Steady => match self.stream.tick() {
-                    Some(s) => *f = Frame::from_mono(s * volume),
+                    Some(s) => {
+                        let after_filter = if lp_active { self.lp.tick(s) } else { s };
+                        *f = Frame::from_mono(after_filter * volume);
+                    }
                     None => {
                         // Source ran out naturally — one-shot reached
                         // its end via Take/FadeOut/etc.
@@ -1307,7 +1411,9 @@ impl Sound for StreamingSound {
                     let t = self.fade_samples_remaining as f32
                         / self.fade_total_samples as f32;
                     let env = t;
-                    let s = self.stream.tick().unwrap_or(0.0) * env * volume;
+                    let src = self.stream.tick().unwrap_or(0.0);
+                    let after_filter = if lp_active { self.lp.tick(src) } else { src };
+                    let s = after_filter * env * volume;
                     *f = Frame::from_mono(s);
                     self.fade_samples_remaining -= 1;
                 }
