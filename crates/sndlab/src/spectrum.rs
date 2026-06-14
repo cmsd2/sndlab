@@ -25,7 +25,14 @@ pub fn compute(buffer: &Buffer) -> Vec<f32> {
     // Round down to a multiple of 2 so the bin count is clean. Real
     // FFTs work for any size in rustfft, but power-of-two sizes are
     // dramatically faster and we don't need exact length here.
-    let n = pow2_le(n).max(1);
+    let n = pow2_le(n);
+    // A 1-sample buffer rounds down to a power-of-two of 1, which is
+    // a degenerate FFT and would also slice past `buffer.samples` if
+    // we forced a larger n. Drop short buffers — the scope shows the
+    // "no buffer" placeholder, which is the right UX anyway.
+    if n < 2 {
+        return Vec::new();
+    }
     let mut buf: Vec<Complex32> = buffer.samples[..n]
         .iter()
         .enumerate()

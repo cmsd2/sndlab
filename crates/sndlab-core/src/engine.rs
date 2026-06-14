@@ -146,6 +146,10 @@ impl Engine {
             .get(name)
             .ok_or_else(|| Error::UnknownPatch(name.into()))?
             .clone();
+        if patch.samples.is_empty() {
+            tracing::warn!("play({name}): patch rendered to 0 samples — nothing to play");
+            return Ok(());
+        }
         let Some(manager) = self.audio.as_mut() else {
             tracing::debug!("play({name}): audio unavailable, dropping");
             return Ok(());
@@ -171,6 +175,17 @@ impl Engine {
             .get(name)
             .ok_or_else(|| Error::UnknownPatch(name.into()))?
             .clone();
+        if patch.samples.is_empty() {
+            tracing::warn!(
+                "play_ambient({name}): patch rendered to 0 samples — nothing to loop"
+            );
+            // Stop any previous loop for this name so we don't leave
+            // a stale handle around for a patch that's now silent.
+            if let Some(mut handle) = self.ambient_handles.remove(name) {
+                handle.stop(Tween::default());
+            }
+            return Ok(());
+        }
         let Some(manager) = self.audio.as_mut() else {
             return Ok(());
         };
@@ -234,6 +249,12 @@ impl Engine {
             .get(name)
             .ok_or_else(|| Error::UnknownPatch(name.into()))?
             .clone();
+        if patch.samples.is_empty() {
+            tracing::warn!(
+                "crossfade_ambient({name}): patch rendered to 0 samples — fading out only"
+            );
+            return Ok(());
+        }
         let Some(manager) = self.audio.as_mut() else {
             return Ok(());
         };
