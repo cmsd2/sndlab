@@ -42,6 +42,13 @@ pub struct Mailbox {
     pub current_patches: Vec<PatchInfo>,
     /// Most recent eval/play error, updated by the main thread.
     pub last_error: Option<String>,
+    /// True when the user has enabled "Live" mode — auto-eval after
+    /// debounce, crossfade ambients into the new buffer on success.
+    /// Hint to the AI that calling play() on a looping ambient is
+    /// redundant; edits are heard automatically.
+    pub live_ambient: bool,
+    /// Names of ambient patches currently looping through the mixer.
+    pub playing_ambients: Vec<String>,
 
     /// Pending commands from MCP to be processed on the main thread.
     pub pending: Vec<Command>,
@@ -176,12 +183,31 @@ impl Server {
     }
 
     #[tool(
-        description = "Play a registered patch by name. The patch must be in list_patches. Audio plays out the user's speakers; you don't receive the audio yourself."
+        description = "Play a registered patch by name once as a one-shot. Audio plays out the user's speakers; you don't receive the audio yourself. \
+                       NOTE: this always fires a one-shot — even for ambient-role patches. If an ambient is already looping (check engine_state) calling play creates a duplicate one-shot on top of the loop, which is almost never what you want. Don't call play on ambient patches after editing them when Live mode is on; the loop crossfades into your edits automatically. For one-shots (sonar pings, hit sounds), call play freely after each edit so the user hears the result."
     )]
     fn play(&self, Parameters(args): Parameters<PlayArgs>) -> String {
         let mut m = self.mailbox.lock().unwrap();
         m.pending.push(Command::Play(args.name));
         "ok (queued for next frame)".into()
+    }
+
+    #[tool(
+        description = "Return the engine's current playback and live-mode state. Use this before deciding whether to call play(): if a patch is in 'playing_ambients' and live_ambient is true, your buffer edits are already audible without a play call."
+    )]
+    fn engine_state(&self) -> String {
+        let m = self.mailbox.lock().unwrap();
+        let mut out = String::new();
+        out.push_str(&format!("live_ambient: {}\n", m.live_ambient));
+        if m.playing_ambients.is_empty() {
+            out.push_str("playing_ambients: (none)\n");
+        } else {
+            out.push_str("playing_ambients:\n");
+            for n in &m.playing_ambients {
+                out.push_str(&format!("  - {n}\n"));
+            }
+        }
+        out
     }
 
     #[tool(
@@ -201,7 +227,13 @@ impl ServerHandler for Server {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(
-                "sndlab editor + audio engine. Tools let you read the editor buffer, propose edits, re-evaluate the buffer, and play patches. Audio plays from the user's machine; you don't hear it directly — ask them what it sounded like.",
+                "sndlab editor + audio engine. Tools let you read the editor buffer, propose edits, re-evaluate the buffer, and play patches. \
+                 \n\nAudio plays from the user's machine; you don't hear it directly — ask them what it sounded like. \
+                 \n\nPatches have a role: 'one_shot' fires once when triggered (sonar pings, weapon launches, UI clicks), 'ambient' loops continuously in the background (ocean rumble, machinery hum). The user toggles ambient loops on/off in the toolbar. \
+                 \n\nThe user can enable 'Live' mode (visible in engine_state as live_ambient: true). In Live mode, sndlab auto-evals after each typing burst and crossfades currently-playing ambient loops into the new rendering automatically. \
+                 \n\nDecision rule for what to call after editing: \
+                 \n- For one-shot patches: call play(name) so the user hears the result. \
+                 \n- For ambient patches: check engine_state. If the ambient is in playing_ambients AND live_ambient is true, do nothing — the loop already crossfaded into your edits. If it's not playing or live_ambient is false, mention it in your reply so the user can toggle it manually. Don't call play() on a looping ambient; it fires a one-shot duplicate on top of the loop.",
             )
     }
 }

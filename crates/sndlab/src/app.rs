@@ -449,9 +449,13 @@ impl SndlabApp {
         // whichever file the user is looking at.
         let patches_snapshot = self.engine.patches().to_vec();
         let active_buffer = self.project.active_buffer().to_string();
+        let playing_ambients = self.engine.ambient_names();
+        let live_ambient = self.live_ambient;
         let mut m = mailbox.lock().unwrap();
         m.current_buffer = active_buffer;
         m.current_patches = patches_snapshot;
+        m.playing_ambients = playing_ambients;
+        m.live_ambient = live_ambient;
     }
 
     /// Play a specific patch (used by toolbar buttons and by the
