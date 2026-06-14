@@ -1182,12 +1182,27 @@ impl SampleRunner {
 pub struct StreamingSoundHandle {
     stop: Arc<AtomicBool>,
     fade_out_ms: Arc<std::sync::atomic::AtomicU64>,
+    /// f32-bits-as-u32 multiplier the audio thread applies to every
+    /// sample. 1.0 is identity; 0.0 silences the stream without
+    /// stopping it. Updated lock-free via an atomic so a host that
+    /// wants to drive volume from game state (distance attenuation,
+    /// depth muffling) can just call `set_volume` every frame.
+    volume_bits: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl StreamingSoundHandle {
     pub fn stop(&self, fade_ms: u64) {
         self.fade_out_ms.store(fade_ms, Ordering::Relaxed);
         self.stop.store(true, Ordering::Relaxed);
+    }
+
+    /// Set the multiplier applied to every output sample. `linear`
+    /// is 0..1 (identity at 1.0). Clamped lightly to `0.0..=4.0` so
+    /// a runaway gain can't unwind the rest of the mixer chain.
+    pub fn set_volume(&self, linear: f32) {
+        let clamped = linear.max(0.0).min(4.0);
+        self.volume_bits
+            .store(clamped.to_bits(), Ordering::Relaxed);
     }
 }
 
@@ -1204,15 +1219,24 @@ impl SoundData for StreamingSoundData {
     fn into_sound(self) -> Result<(Box<dyn Sound>, Self::Handle), Self::Error> {
         let stop = Arc::new(AtomicBool::new(false));
         let fade_out_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let volume_bits = Arc::new(std::sync::atomic::AtomicU32::new(1.0_f32.to_bits()));
         let sound = StreamingSound {
             stream: self.stream,
             stop: stop.clone(),
             fade_out_ms: fade_out_ms.clone(),
+            volume_bits: volume_bits.clone(),
             fade_state: FadeState::Steady,
             fade_samples_remaining: 0,
             fade_total_samples: 0,
         };
-        Ok((Box::new(sound), StreamingSoundHandle { stop, fade_out_ms }))
+        Ok((
+            Box::new(sound),
+            StreamingSoundHandle {
+                stop,
+                fade_out_ms,
+                volume_bits,
+            },
+        ))
     }
 }
 
@@ -1226,6 +1250,11 @@ struct StreamingSound {
     stream: Box<dyn Stream + Send>,
     stop: Arc<AtomicBool>,
     fade_out_ms: Arc<std::sync::atomic::AtomicU64>,
+    /// Live multiplier read once per output buffer. Sample-level
+    /// updates aren't necessary — the host updates this at frame
+    /// rate (~60 Hz) and we read it ~250 Hz (Kira's default buffer
+    /// rate), so smoothness is dominated by Kira's internal mixer.
+    volume_bits: Arc<std::sync::atomic::AtomicU32>,
     fade_state: FadeState,
     fade_samples_remaining: u32,
     fade_total_samples: u32,
@@ -1249,13 +1278,19 @@ impl Sound for StreamingSound {
             }
         }
 
+        // Sample once per buffer — host typically updates at frame
+        // rate, far slower than the audio buffer rate, so the per-
+        // buffer read picks up changes well within a tween-able
+        // window.
+        let volume = f32::from_bits(self.volume_bits.load(Ordering::Relaxed));
+
         for f in out.iter_mut() {
             match self.fade_state {
                 FadeState::Done => {
                     *f = Frame::ZERO;
                 }
                 FadeState::Steady => match self.stream.tick() {
-                    Some(s) => *f = Frame::from_mono(s),
+                    Some(s) => *f = Frame::from_mono(s * volume),
                     None => {
                         // Source ran out naturally — one-shot reached
                         // its end via Take/FadeOut/etc.
@@ -1272,7 +1307,7 @@ impl Sound for StreamingSound {
                     let t = self.fade_samples_remaining as f32
                         / self.fade_total_samples as f32;
                     let env = t;
-                    let s = self.stream.tick().unwrap_or(0.0) * env;
+                    let s = self.stream.tick().unwrap_or(0.0) * env * volume;
                     *f = Frame::from_mono(s);
                     self.fade_samples_remaining -= 1;
                 }

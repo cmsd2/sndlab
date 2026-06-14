@@ -74,6 +74,10 @@ pub struct Engine {
     /// changes. Shared by Arc so the Rhai callback can read the
     /// up-to-date value at eval time without a fresh engine rebuild.
     project_root: Arc<Mutex<Option<std::path::PathBuf>>>,
+    /// Per-call gain (in dB) baked into every one-shot's
+    /// `StaticSoundSettings` at `play()` time. The host's "FX volume"
+    /// slider routes through here. Identity = 0.0 dB.
+    one_shot_volume_db: f32,
 }
 
 /// One live ambient instance. Buffer-based handles control a
@@ -118,7 +122,56 @@ impl Engine {
             patches_info: Vec::new(),
             ambient_handles: HashMap::new(),
             project_root,
+            one_shot_volume_db: 0.0,
         })
+    }
+
+    /// Set the master output volume. `linear` is 0.0..1.0 — 1.0 is
+    /// unchanged, 0.0 is fully silent. Internally converted to dB and
+    /// applied to Kira's main-track handle, which scales every active
+    /// and future sound. A short tween smooths the change so the
+    /// slider doesn't introduce pops.
+    pub fn set_master_volume(&mut self, linear: f32) {
+        let Some(manager) = self.audio.as_mut() else {
+            return;
+        };
+        let db = linear_to_db(linear);
+        manager.main_track().set_volume(
+            db,
+            Tween {
+                duration: std::time::Duration::from_millis(50),
+                ..Tween::default()
+            },
+        );
+    }
+
+    /// Set the gain applied to all subsequent one-shot plays. Live
+    /// sounds already in flight are not affected — the slider's value
+    /// is baked into `StaticSoundSettings` at `play()` time.
+    pub fn set_one_shot_volume(&mut self, linear: f32) {
+        self.one_shot_volume_db = linear_to_db(linear);
+    }
+
+    /// Set the volume of a specific ambient handle. No-op if the
+    /// ambient isn't currently playing. Use this to bind a per-patch
+    /// slider (e.g. "sub_hum") to the playing instance.
+    pub fn set_ambient_volume(&mut self, name: &str, linear: f32) {
+        let Some(handle) = self.ambient_handles.get_mut(name) else {
+            return;
+        };
+        let db = linear_to_db(linear);
+        let tween = Tween {
+            duration: std::time::Duration::from_millis(50),
+            ..Tween::default()
+        };
+        match handle {
+            AmbientHandle::Buffer(h) => h.set_volume(db, tween),
+            // Streaming sound: per-buffer atomic in the custom
+            // Sound. No tween — the host typically updates the
+            // value every frame anyway, so Kira's track-level
+            // tween would just lag the player's input.
+            AmbientHandle::Stream(h) => h.set_volume(linear),
+        }
     }
 
     /// Set the directory relative paths in `sample("…")` resolve
@@ -251,7 +304,7 @@ impl Engine {
         let data = StaticSoundData {
             sample_rate,
             frames: frames.into(),
-            settings: StaticSoundSettings::default(),
+            settings: StaticSoundSettings::default().volume(self.one_shot_volume_db),
             slice: None,
         };
         manager.play(data).map_err(|e| Error::Audio(e.to_string()))?;
@@ -1036,6 +1089,19 @@ fn register_sample_dsl(
             load(&pr_loop, path, true)
         },
     );
+}
+
+/// Convert a 0..1 linear gain factor to a dB value suitable for
+/// Kira's volume APIs. Values at or below `1e-4` map to a hard
+/// "effectively silent" floor of -80 dB so the slider's zero
+/// position actually produces silence (true zero linear → -inf dB,
+/// which most APIs accept but is easy to misread).
+fn linear_to_db(linear: f32) -> f32 {
+    let clamped = linear.max(0.0).min(4.0);
+    if clamped < 1e-4 {
+        return -80.0;
+    }
+    20.0 * clamped.log10()
 }
 
 fn parse_noise_kind(s: &str) -> std::result::Result<NoiseKind, Box<EvalAltResult>> {
