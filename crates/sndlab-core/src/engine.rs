@@ -62,13 +62,7 @@ impl Engine {
     pub fn new() -> Result<Self> {
         let state: Arc<Mutex<EvalState>> = Arc::new(Mutex::new(EvalState::default()));
         let rhai = build_rhai_engine(state.clone());
-        let audio = match AudioManager::<DefaultBackend>::new(AudioManagerSettings::default()) {
-            Ok(m) => Some(m),
-            Err(e) => {
-                tracing::warn!("audio: init failed, engine running silently: {e}");
-                None
-            }
-        };
+        let audio = open_audio_manager();
         Ok(Self {
             rhai,
             state,
@@ -304,6 +298,69 @@ impl Engine {
 
     pub fn patches(&self) -> &[PatchInfo] {
         &self.patches_info
+    }
+}
+
+/// Open the audio backend with a sensible buffer size. We start by
+/// asking cpal to use a generous fixed buffer (large enough that
+/// scheduling jitter on the audio thread doesn't underrun and
+/// produce clicks). If the device rejects that — some backends do
+/// — we fall back to cpal's default. Either way, init failure is
+/// non-fatal: the engine runs silently if no audio can be opened.
+fn open_audio_manager() -> Option<AudioManager<DefaultBackend>> {
+    use cpal::{
+        traits::{DeviceTrait, HostTrait},
+        BufferSize, StreamConfig,
+    };
+    use kira::backend::cpal::CpalBackendSettings;
+
+    // Target: 2048 frames at the device's preferred rate. At 48 kHz
+    // that's ~43 ms — comfortably above PipeWire's typical 5 ms
+    // quantum, which is the size that's been seen to underrun on
+    // moderately loaded Linux desktops.
+    const TARGET_FRAMES: u32 = 2048;
+
+    let host = cpal::default_host();
+    let device = host.default_output_device();
+    let preferred_config = device
+        .as_ref()
+        .and_then(|d| d.default_output_config().ok());
+
+    let mut backend_settings = CpalBackendSettings::default();
+    if let (Some(_), Some(supported)) = (device.as_ref(), preferred_config) {
+        let mut stream: StreamConfig = supported.config();
+        stream.buffer_size = BufferSize::Fixed(TARGET_FRAMES);
+        backend_settings.device = device;
+        backend_settings.config = Some(stream);
+    }
+
+    let settings_with_buffer = AudioManagerSettings::<DefaultBackend> {
+        backend_settings: backend_settings.clone(),
+        ..Default::default()
+    };
+
+    match AudioManager::<DefaultBackend>::new(settings_with_buffer) {
+        Ok(m) => {
+            tracing::info!(
+                "audio: cpal stream opened with {} frame buffer",
+                TARGET_FRAMES
+            );
+            return Some(m);
+        }
+        Err(e) => {
+            tracing::warn!(
+                "audio: cpal rejected a {} frame buffer ({e}); falling back to default",
+                TARGET_FRAMES
+            );
+        }
+    }
+
+    match AudioManager::<DefaultBackend>::new(AudioManagerSettings::default()) {
+        Ok(m) => Some(m),
+        Err(e) => {
+            tracing::warn!("audio: init failed, engine running silently: {e}");
+            None
+        }
     }
 }
 

@@ -3582,6 +3582,7 @@ dependencies = [
 name = "sndlab-core"
 version = "0.1.0"
 dependencies = [
+ "cpal",
  "fundsp",
  "kira",
  "rand 0.8.6",

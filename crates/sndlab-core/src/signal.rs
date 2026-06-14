@@ -329,6 +329,21 @@ fn biquad_w0_alpha(freq_hz: f32, q: f32) -> (f32, f32) {
 /// Run a Direct-Form-I biquad with the given un-normalised
 /// coefficients across `samples`. The caller supplies a non-zero
 /// `a0`; this function normalises by it and runs the recurrence.
+///
+/// Two passes are run: the first walks the entire buffer and
+/// discards its output (warming up the filter state); the second
+/// walks the buffer again and records output. The state at the
+/// start of pass 2 is therefore the filter's state after seeing
+/// the buffer's full content — which is exactly what the state
+/// would be at the loop boundary if the buffer were played
+/// continuously. Sample 0 of the output thus matches what the
+/// filter "looks like" at the wrap point, so a looping ambient
+/// patch doesn't click at every loop boundary just because the
+/// filter is cold-starting.
+///
+/// For one-shot patches (no loop, env masks the start anyway)
+/// the warmup is inaudible. Cost: doubles the filter's CPU per
+/// patch, negligible for sub-second buffers.
 fn apply_biquad(
     samples: &[f32],
     b0: f32,
@@ -349,6 +364,19 @@ fn apply_biquad(
     let mut x2 = 0.0_f32;
     let mut y1 = 0.0_f32;
     let mut y2 = 0.0_f32;
+
+    // Pass 1: warm up the state by walking the buffer once and
+    // discarding output.
+    for &x0 in samples {
+        let y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+        x2 = x1;
+        x1 = x0;
+        y2 = y1;
+        y1 = y0;
+    }
+
+    // Pass 2: actual filtering. State at start is what the filter
+    // would have at the loop boundary.
     let mut out = Vec::with_capacity(samples.len());
     for &x0 in samples {
         let y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;

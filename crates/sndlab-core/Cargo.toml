@@ -15,6 +15,11 @@ fundsp.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
+# Used directly to override Kira's cpal buffer size. Version pinned
+# to whatever Kira itself uses so we don't get two copies of cpal in
+# the build.
+cpal = "0.17"
+
 # Determinism: every patch evaluation seeds an explicit PCG generator
 # from the patch name, so re-evaluating produces the same buffer.
 rand = "0.8"
